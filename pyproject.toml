@@ -20,6 +20,9 @@ dependencies = [
     "anthropic>=0.40",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
