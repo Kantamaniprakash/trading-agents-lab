@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/cache/
+cache/llm/
+results/transcripts_dryrun/
+REVIEW_FINDINGS.json
+*.egg-info/
+build/
+dist/
+.env
