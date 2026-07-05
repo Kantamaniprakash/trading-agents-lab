@@ -12,8 +12,9 @@ beyond a well-tuned quant baseline?*
    reference future rows. Labels are strictly forward.
 2. **LLM knowledge-cutoff leakage is a first-class threat.** The paper backtests GPT-4o on
    Jan–Mar 2024, which is inside its training data. We mitigate with (a) an anti-leakage
-   system-prompt clause, (b) an `--anonymize` mode that masks ticker names and dates so the
-   LLM cannot recall memorized price paths, and (c) documentation that only post-cutoff
+   system-prompt clause, (b) an `--anonymize` mode that masks ticker names and dates AND rebases
+   prices to an index (start = 100) with volumes as percent-of-average, so the LLM can
+   neither recall memorized price paths nor re-identify the asset from raw levels, and (c) documentation that only post-cutoff
    evaluation is trustworthy.
 3. **Transaction costs always on.** Default 10 bps per unit turnover.
 4. **Honest reporting.** Multi-year evaluation for rule/ML strategies; per-ticker and
@@ -361,8 +362,16 @@ def snapshot_from_history(df, date, ticker, lookback=60, anonymize=False,
   rows. Builds: price table (last 10 rows, rounded);
   indicator report from `compute_indicator_frame` latest row (RSI, MACD vs signal, %B,
   ATR, ADX, CCI, stoch K/D, close vs SMA10/50/200, MFI); returns summary (1/5/21/63-day
-  returns, 21d annualized vol, distance from 52w high/low). When anonymize=True the price
-  table index is renamed to "T-9".."T-0" and no real dates/ticker appear anywhere.
+  returns, 21d annualized vol, distance from 52w high/low). When anonymize=True the
+  ENTIRE working slice is rebased before anything is rendered: OHLC is scaled by
+  `k = 100 / close` at the first displayed row (so the first displayed close is exactly
+  100.0 and prices are index levels) and volume is replaced by relative volume
+  (% of the slice's mean, 100 = average day). The price table, indicator report and
+  returns summary are all computed from the rebased frame, so every number is internally
+  consistent — scale-free indicators (RSI/ADX/%B/stoch/MFI, returns, vol) are unchanged
+  by construction while price-level ones (SMA/MACD/Bollinger/ATR) scale with k. The
+  table is labeled "indexed (start = 100)" / "% of average", the index is renamed to
+  "T-9".."T-0", and no real dates/ticker/price levels/volume magnitudes appear anywhere.
 ```python
 class TradingAgentsPipeline:
     def __init__(self, client: LLMClient, cfg: AgentConfig): ...

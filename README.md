@@ -19,7 +19,7 @@ in an evaluation framework that fixes the paper's four methodological problems:
 | Paper's weakness | What this repo does instead |
 |---|---|
 | 3-month backtest window, 3 tickers | 11.5 years of data, 10 tickers across sectors, multi-year walk-forward test window |
-| LLM likely trained on the backtest period (Jan–Mar 2024 is inside GPT-4o's training data) | Anti-leakage prompt clause on every agent + `--anonymize` mode that masks ticker names and dates from every prompt, making memorized-price-path recall substantially harder (price levels stay raw — see Limitations) |
+| LLM likely trained on the backtest period (Jan–Mar 2024 is inside GPT-4o's training data) | Anti-leakage prompt clause on every agent + `--anonymize` mode that masks ticker names and dates **and rebases every price to an index (first displayed close = 100) with volume as % of the window average**, so no raw price or volume level — the fingerprint that identifies a well-known stock — reaches the prompt (residual risk remains — see Limitations) |
 | No transaction costs | 10 bps per unit turnover, always on; cost sensitivity reported |
 | Weak baselines (naive MACD/SMA rules) | The paper's five baselines **plus** a LightGBM walk-forward model (expanding window, embargoed splits) as a serious ML benchmark |
 
@@ -42,6 +42,12 @@ demonstration on data the model can't simply recall. At n = 64 days the Sharpe g
 directional evidence, not statistical significance; the multi-ticker, multi-quarter sweep
 is roadmap item 1. The interesting part is the shape of the failure: persistently late,
 not merely unlucky.*
+
+*Masking note: this recorded run used anonymization **v1**, which masked names and dates
+but left raw price levels visible — a potential re-identification fingerprint. The
+current code rebases prices to an index (start = 100) and volumes to percent-of-average
+(**v2**), closing that channel. Notably, even with the v1 fingerprint available, the
+agents did not trade as if they recalled this window.*
 
 The agents traded cautiously (never above 0.35 exposure), which kept volatility at a
 third of buy-and-hold — but the direction was wrong for two of the three months. One
@@ -107,7 +113,7 @@ Full design rationale and module contracts: [DESIGN.md](DESIGN.md).
 
 ```bash
 pip install -e .
-python -m pytest tests/ -q          # 47 tests, incl. no-lookahead perturbation tests
+python -m pytest tests/ -q          # 62 tests, incl. no-lookahead perturbation tests
 
 python -m tradinglab.cli download   # 10 tickers, 2015 → today (cached parquet)
 python -m tradinglab.cli baselines  # the paper's 5 rule strategies, full history
@@ -174,6 +180,31 @@ The "paper portfolio" is bookkeeping in a local JSON file; all results are simul
 historical data. See [Limitations](#limitations-read-before-believing-any-backtest) before
 acting on any output.
 
+### Memorization probe: measure the leak instead of assuming it
+
+Stated knowledge cutoffs are not a leakage guarantee, and no prompt clause can delete
+knowledge baked into pretraining weights. Before trusting any backtest window, probe it:
+
+```bash
+python -m tradinglab.cli probe --ticker AAPL --start 2024-01-02 --end 2024-03-28
+```
+
+With **no market data in the prompt** (ticker + dates only), the model is asked to recall
+approximate closing prices on 8 dates in the window and the rise/fall direction of each
+calendar month. Price errors are compared against a naive carry-forward anchor (the last
+close before the window — a model with no knowledge of the window cannot beat it), and
+direction hits against a 50% coin-flip. The verdict is a heuristic screen, not a proof:
+
+- **CONTAMINATED** — the model halves the naive anchor's price error, or calls monthly
+  direction at ≥ 75% with mostly high confidence. Backtests on this window measure
+  memory, not skill: use `--anonymize` and heavily discount the results.
+- **LIKELY CLEAN** — price guesses at or worse than the anchor and direction near chance;
+  the window appears outside what the model can recall.
+- **INCONCLUSIVE** — mixed signal; prefer `--anonymize` plus post-cutoff windows.
+
+Per-question records and the summary are saved to `results/probe_{ticker}_{start}_{end}.json`.
+Requires `ANTHROPIC_API_KEY`; probe calls go through the LLM disk cache, so re-runs are free.
+
 ## The rest of the evidence
 
 All numbers net of 10 bps costs, Sharpe vs 4% risk-free, equal-weight 10-ticker portfolio.
@@ -233,7 +264,7 @@ Findings a 3-month backtest could never show:
 
 ## Verification
 
-- 47 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
+- 62 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
   future rows → assert all earlier features/indicators/engine outputs are bit-identical).
 - A five-dimension adversarial review pass (lookahead, statistics, costs, data hygiene,
   prompt leakage — every finding independently re-verified before acceptance) surfaced
@@ -247,10 +278,13 @@ Findings a 3-month backtest could never show:
 - Survivorship bias: the 10-ticker universe is today's winners; results overstate what was
   achievable ex ante. A point-in-time universe (e.g. historical S&P constituents) is on
   the roadmap.
-- Anonymization masks tickers and dates but not price levels or volumes — a well-known
-  ticker is in principle identifiable from its price/volume scale. Rebasing prices to 100
-  at window start is a planned hardening step; until then, anonymize + post-cutoff window
-  is the strongest available guarantee.
+- Anonymization masks tickers and dates and rebases all levels: OHLC is scaled so the
+  first displayed close is exactly 100 (index levels, not dollars) and volume is reported
+  as % of the window's average day, with indicators and return stats computed from the
+  rebased frame so nothing at the real scale leaks. Residual risk remains even so: the
+  *shape* of the return path could in principle be matched against memorized history, and
+  regime knowledge (what markets in general were doing) survives any masking —
+  anonymization reduces leakage, only forward-testing on post-cutoff data eliminates it.
 - yfinance fundamentals/news are current-snapshot, not point-in-time → live mode only.
 - Single-asset signals with equal-weight aggregation; no position sizing, borrow costs,
   or market-impact modeling beyond linear bps.

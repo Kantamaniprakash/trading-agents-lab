@@ -53,6 +53,39 @@ def _trailing_return(close: pd.Series, n: int) -> float:
     return float(close.iloc[-1] / close.iloc[-1 - n] - 1.0)
 
 
+def _rebase_for_anonymize(window: pd.DataFrame, display_rows: int = 10) -> pd.DataFrame:
+    """Rebase a history slice to scale-free levels for anonymized snapshots.
+
+    Masking tickers and dates is not enough: raw price/volume levels are a
+    fingerprint that lets a model re-identify a well-known stock and recall its
+    memorized path. This scales open/high/low/close by ``k = 100 / close`` at
+    the first row the price table will display, so the first displayed close is
+    exactly 100.0 and every price is an index level, and replaces volume with
+    relative volume (% of the slice's mean volume; 100 = average day).
+
+    Everything downstream (price table, indicator report, returns summary) is
+    computed from the rebased frame so the numbers stay internally consistent:
+    scale-free indicators (RSI, ADX, %B, stochastics, MFI, returns, vol) are
+    unchanged by construction, while price-level ones (SMA, MACD, Bollinger
+    bands, ATR) scale by the same k as the displayed prices.
+    """
+    anchor = float(window["close"].iloc[-min(display_rows, len(window))])
+    if not math.isfinite(anchor) or anchor <= 0:
+        raise ValueError(
+            "Cannot rebase for anonymization: close at the start of the "
+            f"displayed window must be positive and finite, got {anchor!r}")
+    k = 100.0 / anchor
+    rebased = window.copy()
+    for col in ("open", "high", "low", "close"):
+        rebased[col] = window[col] * k
+    mean_vol = float(window["volume"].mean())
+    if math.isfinite(mean_vol) and mean_vol > 0:
+        rebased["volume"] = window["volume"] / mean_vol * 100.0
+    else:  # degenerate slice (all-zero/NaN volume): nothing to normalize
+        rebased["volume"] = 0.0
+    return rebased
+
+
 def snapshot_from_history(df: pd.DataFrame, date: str | pd.Timestamp, ticker: str,
                           lookback: int = 60, anonymize: bool = False,
                           fundamentals: str | None = None,
@@ -60,9 +93,12 @@ def snapshot_from_history(df: pd.DataFrame, date: str | pd.Timestamp, ticker: st
     """Build a MarketSnapshot from price history up to and including `date`.
 
     Slices `df.loc[:date]` FIRST and computes everything from that slice only
-    (no lookahead by construction). When `anonymize=True` the price table uses
-    relative row labels ("T-9".."T-0") and no real dates or ticker names appear
-    in any rendered block.
+    (no lookahead by construction). When `anonymize=True` the whole working
+    slice is rebased BEFORE anything is rendered (`_rebase_for_anonymize`):
+    prices become index levels (first displayed close = 100.0), volume becomes
+    % of the slice's average volume, and the price table uses relative row
+    labels ("T-9".."T-0") — so no real dates, ticker names, price levels or
+    volume magnitudes appear in any rendered block.
     """
     ts = pd.Timestamp(date)
     history = df.loc[:ts]
@@ -71,16 +107,24 @@ def snapshot_from_history(df: pd.DataFrame, date: str | pd.Timestamp, ticker: st
     assert history.index.max() <= ts, "history slice must not contain future rows"
 
     window = history.tail(max(int(lookback), _MIN_WINDOW_ROWS))
+    if anonymize:
+        # Rebase the ENTIRE slice first so the table, indicators and returns
+        # summary below are all computed from the same masked frame.
+        window = _rebase_for_anonymize(window)
 
     # --- price table: last 10 rows, rounded ---
     tail = window[["open", "high", "low", "close", "volume"]].tail(10).copy()
     tail[["open", "high", "low", "close"]] = tail[["open", "high", "low", "close"]].round(2)
-    tail["volume"] = tail["volume"].round(0).astype("int64")
     if anonymize:
+        tail["volume"] = tail["volume"].round(1)
         tail.index = [f"T-{i}" for i in range(len(tail) - 1, -1, -1)]
+        price_table = (
+            "[prices indexed (start = 100); volume in % of average daily "
+            "volume (100 = average day)]\n" + tail.to_string())
     else:
+        tail["volume"] = tail["volume"].round(0).astype("int64")
         tail.index = [d.strftime("%Y-%m-%d") for d in tail.index]
-    price_table = tail.to_string()
+        price_table = tail.to_string()
 
     # --- indicator report: latest row of the standard indicator frame ---
     last = compute_indicator_frame(window).iloc[-1]
