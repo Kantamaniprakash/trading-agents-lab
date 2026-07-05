@@ -136,12 +136,62 @@ token/cost summary after every run; repeated runs hit the disk cache and cost no
 knowledge cutoff, or `--anonymize`.** Backtesting an LLM on dates it was trained through
 measures memory, not skill — this is the paper's central flaw.
 
+## Trader dashboard (no code needed)
+
+Everything in this repo can be driven from a point-and-click web dashboard — no Python
+knowledge required.
+
+**To start it: double-click `run_dashboard.bat`** (Windows). It installs the two dashboard
+dependencies, opens your browser at `http://localhost:8501`, and starts the app. Close the
+console window to stop it. On macOS/Linux (or if you prefer the terminal), run:
+
+```bash
+pip install -r requirements-app.txt
+python -m streamlit run app.py
+```
+
+**What each page does:**
+
+- **Results** — interactive equity-curve comparisons (any stock, full history or the agent
+  run window, agent desk highlighted) and the metrics tables for every saved run
+  (baselines, the ML model, agent backtests), read straight from `results/*.csv`.
+- **AI Trading Desk** — pick any stock and click *Run AI analysis*: the full agent
+  pipeline runs on the **latest market data** (prices, fundamentals, news) and returns a
+  BUY / SELL / HOLD card with suggested exposure, the complete reasoning (every analyst
+  report, the bull-vs-bear debate, the risk team's ruling), an interactive candlestick
+  chart, and the exact API cost of the run (typically $0.20–0.50; cached reruns are free).
+- **Paper Portfolio** — a simulated account that starts with $100,000 of pretend cash
+  (`results/portfolio.json`). Apply the AI desk's latest decision with one click, or buy
+  and sell manually at live prices, and track profit/loss — without risking a cent.
+- **Transcripts** — the full debate transcript for any past decision day.
+
+**API key:** the AI Trading Desk needs an Anthropic API key to call the LLMs. Paste it
+into the key box in the dashboard sidebar (it is kept in your session only and never
+written to disk). All other pages work without any key.
+
+**Safety note:** nothing in this project connects to a brokerage or places real orders.
+The "paper portfolio" is bookkeeping in a local JSON file; all results are simulations on
+historical data. See [Limitations](#limitations-read-before-believing-any-backtest) before
+acting on any output.
+
 ## The rest of the evidence
 
 All numbers net of 10 bps costs, Sharpe vs 4% risk-free, equal-weight 10-ticker portfolio.
 Baseline and long/short ML tables in `results/*.csv`, per-ticker equity plots in
 `results/*.png`. Regenerate the README figures with `python scripts/make_figures.py`
 (requires the price cache from `python -m tradinglab.cli download` first).
+
+### The anonymized agent run, in the paper's own figure styles
+
+Strategy comparison (paper Fig. 7 style) — the agent desk in bold against the five rule
+baselines over the same window:
+
+![Strategy comparison — cumulative returns for AAPL with the agent desk highlighted](results/figures/agents_aapl_2026_comparison.png)
+
+Transaction history (paper Fig. 6 style) — portfolio value and exposure, per-trade P/L,
+and candlesticks with the agents' buy/sell markers:
+
+![Agent desk transaction history for AAPL — value, trade P/L, candlesticks with decision markers](results/figures/agents_aapl_2026_txn.png)
 
 ### The paper's baselines, 2015 → mid-2026 (2,891 trading days)
 
