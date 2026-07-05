@@ -5,6 +5,7 @@ Subcommands:
     baselines  run the paper's five rule baselines + equal-weight portfolio
     train-ml   walk-forward LightGBM alpha model vs buy-and-hold
     agents     LLM multi-agent backtest for one ticker (needs ANTHROPIC_API_KEY)
+    probe      memorization probe: can the LLM recall a window? (needs ANTHROPIC_API_KEY)
     report     print a combined summary of previously saved result CSVs
 
 Run as ``python -m tradinglab.cli <cmd> [options]``. Tables are printed to
@@ -13,6 +14,7 @@ stdout and CSV/PNG artifacts are written to ``results/``.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -454,6 +456,107 @@ def cmd_agents(args: argparse.Namespace) -> None:
     print(f"transcripts: {out_dir}")
 
 
+def cmd_probe(args: argparse.Namespace) -> None:
+    """Probe the backbone LLM for memorized knowledge of a price window."""
+    # Heavy imports (anthropic) deferred so key-less environments can still
+    # run download/baselines/train-ml/report.
+    from tradinglab.agents.llm import LLMClient
+    from tradinglab.agents.probe import run_probe
+
+    agent_cfg = AgentConfig()
+
+    # Fetch history from well before the window so the naive carry-forward
+    # anchor (last close BEFORE start) exists. Compare as timestamps, not
+    # strings: non-ISO inputs like "6/1/2010" sort wrong lexicographically.
+    fetch_start = min(DataConfig().start, args.start, key=pd.Timestamp)
+    prices = fetch_prices(args.ticker, fetch_start, args.end, cache_dir=DATA_CACHE_DIR)
+    df = prices[args.ticker]
+
+    window = df.loc[pd.Timestamp(args.start): pd.Timestamp(args.end)]
+    if window.empty:
+        print(f"error: no trading days for {args.ticker} in [{args.start}, {args.end}]")
+        sys.exit(1)
+
+    model_label = args.model or agent_cfg.deep_model
+    print(
+        f"probing {model_label} for memorized knowledge of {args.ticker} "
+        f"[{args.start} .. {args.end}]: {min(args.n, len(window))} price dates "
+        f"+ monthly directions (prompts contain ticker + dates ONLY, no prices)"
+    )
+
+    client = LLMClient(agent_cfg, cache_dir=LLM_CACHE_DIR)
+    try:
+        result = run_probe(
+            client, df, args.ticker, args.start, args.end,
+            n_dates=args.n, model=args.model,
+        )
+    except RuntimeError as exc:  # missing API key surfaces here
+        print(f"error: {exc}")
+        sys.exit(1)
+
+    # --- per-question tables -------------------------------------------------
+    if result["price_questions"]:
+        price_table = pd.DataFrame(result["price_questions"]).set_index("date")
+        price_table["abs_err_pct"] = price_table.pop("ape") * 100.0
+        price_table["naive_err_pct"] = price_table.pop("naive_ape") * 100.0
+        _print_table(price_table, "Price recall (model answer vs actual close)")
+    else:
+        print("\n=== Price recall === (no parseable answers)")
+
+    if result["direction_questions"]:
+        dir_table = pd.DataFrame(result["direction_questions"]).set_index("month")
+        _print_table(dir_table, "Direction recall (monthly rise/fall)")
+    else:
+        print("\n=== Direction recall === (no parseable answers)")
+
+    # --- summary + verdict ---------------------------------------------------
+    s = result["summary"]
+
+    def _pct_or_na(value: float | None) -> str:
+        return "n/a" if value is None else f"{value * 100:.2f}%"
+
+    print(f"\n=== Probe summary — {args.ticker} [{result['start']} .. {result['end']}] ===")
+    print(f"model:                     {s['model']}")
+    print(f"price questions:           {s['n_price']} answered, {s['n_price_skipped']} skipped")
+    print(f"price MAPE (model):        {_pct_or_na(s['price_mape'])}")
+    print(
+        f"price MAPE (naive anchor): {_pct_or_na(s['naive_mape'])}   "
+        f"(carry-forward close {s['naive_anchor']:.2f} from {s['naive_anchor_date']})"
+    )
+    print(f"direction questions:       {s['n_direction']} answered, {s['n_direction_skipped']} skipped")
+    print(f"direction hit rate:        {_pct_or_na(s['direction_hit_rate'])} (chance = 50%)")
+    print(f"high-confidence answers:   {s['n_high_confidence']}")
+    print(f"\nVERDICT: {s['verdict']}")
+    explanations = {
+        "CONTAMINATED": (
+            "The model can recall this window from its pretraining data. "
+            "Backtests on this window measure memory, not skill — use "
+            "--anonymize and heavily discount any results on this period."
+        ),
+        "LIKELY CLEAN": (
+            "The window appears to be outside what the model can recall: "
+            "price guesses are no better than the naive carry-forward anchor "
+            "and direction calls are near coin-flip."
+        ),
+        "INCONCLUSIVE": (
+            "Mixed or insufficient signal — the probe could neither confirm "
+            "nor rule out memorization. Prefer --anonymize and post-cutoff "
+            "windows, and treat backtests on this window with caution."
+        ),
+    }
+    print(explanations.get(s["verdict"], ""))
+
+    # --- artifacts -------------------------------------------------------------
+    out_path = (
+        RESULTS_DIR / f"probe_{args.ticker}_{result['start']}_{result['end']}.json"
+    )
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(result, fh, ensure_ascii=False, indent=2)
+
+    _print_table(_usage_table(client.usage), "Token usage / cost (USD)")
+    print(f"\nsaved: {out_path}")
+
+
 def cmd_report(args: argparse.Namespace) -> None:
     """Load saved result CSVs and print a combined summary."""
     found = False
@@ -534,6 +637,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ag.add_argument("--cost-bps", type=float, default=bt_defaults.cost_bps)
     p_ag.set_defaults(func=cmd_agents)
+
+    p_pr = sub.add_parser(
+        "probe",
+        help="memorization probe: can the LLM recall this window? (needs API key)",
+    )
+    p_pr.add_argument("--ticker", required=True)
+    p_pr.add_argument("--start", required=True)
+    p_pr.add_argument("--end", required=True)
+    p_pr.add_argument(
+        "--n", type=_positive_int, default=8,
+        help="number of price-recall dates, evenly spaced in the window (>= 1)",
+    )
+    p_pr.add_argument(
+        "--model", default=None,
+        help="override the probed model (default: the agent deep model)",
+    )
+    p_pr.set_defaults(func=cmd_probe)
 
     p_rp = sub.add_parser("report", help="combined summary of saved results")
     p_rp.set_defaults(func=cmd_report)
