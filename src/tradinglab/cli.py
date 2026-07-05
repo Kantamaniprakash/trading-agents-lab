@@ -84,6 +84,48 @@ def _plot_equity(curves: dict[str, pd.Series], title: str, out_path: Path) -> No
     plt.close(fig)
 
 
+def _figures_dir() -> Path:
+    """Return results/figures, creating it if needed."""
+    fig_dir = RESULTS_DIR / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    return fig_dir
+
+
+def _decisions_frame(logs: list, long_only: bool = False) -> pd.DataFrame:
+    """Flatten AgentDayLog records into the decisions-CSV schema.
+
+    Columns (exactly): ``date, action, size, verdict, position_after``.
+    ``position_after`` replays the engine's action-to-signal mapping
+    (BUY -> +size, SELL -> -size or 0 when long_only, HOLD -> carry the
+    prior position), so it is the signal value actually held after each
+    decision — including HOLD carry.
+    """
+    rows: list[dict] = []
+    position = 0.0
+    for log in logs:
+        action = str(log.final_action)
+        size = float(log.final_size)
+        if action == "BUY":
+            position = size
+        elif action == "SELL":
+            position = 0.0 if long_only else -size
+        # anything else (HOLD or unrecognized) carries the prior position
+        debate = getattr(log, "debate", None)
+        verdict = str(getattr(debate, "verdict", "")) if debate is not None else ""
+        rows.append(
+            {
+                "date": log.date,
+                "action": action,
+                "size": size,
+                "verdict": verdict,
+                "position_after": position,
+            }
+        )
+    return pd.DataFrame(
+        rows, columns=["date", "action", "size", "verdict", "position_after"]
+    )
+
+
 def _usage_table(usage: dict) -> pd.DataFrame:
     """Build a per-model token usage/cost table (USD) with a TOTAL row."""
     rows: dict[str, dict] = {}
@@ -134,9 +176,14 @@ def cmd_download(args: argparse.Namespace) -> None:
 
 def cmd_baselines(args: argparse.Namespace) -> None:
     """Run all five rule baselines per ticker plus an equal-weight portfolio."""
+    # Lazy import: plotting pulls in the paper-figure styling stack and is
+    # only needed by subcommands that render figures.
+    from tradinglab.plotting import plot_strategy_comparison
+
     bt_cfg = BacktestConfig(cost_bps=args.cost_bps)
     rf = bt_cfg.risk_free_rate
     prices = fetch_prices(list(args.tickers), args.start, args.end, cache_dir=DATA_CACHE_DIR)
+    fig_dir = _figures_dir()
 
     results: dict[str, dict] = {}
     for ticker, df in prices.items():
@@ -154,6 +201,13 @@ def cmd_baselines(args: argparse.Namespace) -> None:
             png,
         )
         print(f"saved: {png}")
+        comparison_png = fig_dir / f"baselines_comparison_{ticker}.png"
+        plot_strategy_comparison(
+            {n: r.equity for n, r in per_strat.items()},
+            f"{ticker} — baseline strategies (net of {args.cost_bps:g} bps)",
+            comparison_png,
+        )
+        print(f"saved: {comparison_png}")
 
     named_returns: dict[str, pd.Series] = {}
     for ticker in prices:
@@ -360,10 +414,43 @@ def cmd_agents(args: argparse.Namespace) -> None:
         png,
     )
 
+    # --- decisions CSV (columns: date,action,size,verdict,position_after) ---
+    decisions = _decisions_frame(logs, long_only=args.long_only)
+    dec_path = RESULTS_DIR / f"agents_{args.ticker}_decisions.csv"
+    decisions.to_csv(dec_path, index=False)
+
+    # --- paper-style figures (Fig-7 comparison + Fig-6 transaction history) ---
+    # Lazy import: keeps the plotting stack out of key-less/light subcommands.
+    from tradinglab.plotting import plot_strategy_comparison, plot_transaction_history
+
+    fig_dir = _figures_dir()
+    start_tag = pd.Timestamp(args.start).strftime("%Y-%m-%d")
+    end_tag = pd.Timestamp(args.end).strftime("%Y-%m-%d")
+    cmp_png = fig_dir / f"agents_{args.ticker}_{start_tag}_{end_tag}.png"
+    plot_strategy_comparison(
+        {"agent_desk": result.equity, "buy_hold": bench.equity},
+        f"{args.ticker} — agent desk vs buy & hold "
+        f"(net of {args.cost_bps:g} bps)",
+        cmp_png,
+        highlight="agent_desk",
+    )
+    txn_png = fig_dir / f"agents_{args.ticker}_{start_tag}_{end_tag}_txn.png"
+    plot_transaction_history(
+        bench_df,
+        result.positions,
+        txn_png,
+        title=f"{args.ticker} — agent transaction history [{start_tag} .. {end_tag}]",
+        decisions=decisions,
+        cost_bps=args.cost_bps,
+    )
+
     _print_table(_usage_table(client.usage), "Token usage / cost (USD)")
     print(f"\ndecisions logged: {len(logs)}")
     print(f"saved: {csv_path}")
+    print(f"saved: {dec_path}")
     print(f"saved: {png}")
+    print(f"saved: {cmp_png}")
+    print(f"saved: {txn_png}")
     print(f"transcripts: {out_dir}")
 
 

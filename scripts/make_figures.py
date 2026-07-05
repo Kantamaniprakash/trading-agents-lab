@@ -7,6 +7,9 @@ from the reported numbers.
 Usage:  python scripts/make_figures.py
 Writes: results/figures/agents_aapl_2026.png
         results/figures/baselines_sharpe.png
+        results/figures/agents_aapl_2026_comparison.png   (paper Fig-7 style)
+        results/figures/agents_aapl_2026_txn.png          (paper Fig-6 style)
+        results/figures/baselines_comparison_{AAPL,NVDA,TSLA}.png
 """
 from __future__ import annotations
 
@@ -16,7 +19,13 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from tradinglab.backtest.baselines import STRATEGIES
 from tradinglab.backtest.engine import backtest_signals
+from tradinglab.plotting import (
+    parse_transcript_decisions,
+    plot_strategy_comparison,
+    plot_transaction_history,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 FIG_DIR = ROOT / "results" / "figures"
@@ -176,14 +185,69 @@ def fig_baselines_sharpe() -> None:
     plt.close(fig)
 
 
+def fig_paper_style(prices: pd.DataFrame) -> None:
+    """Paper Fig-7 comparison + Fig-6 transaction history for the agent run."""
+    decisions = parse_transcript_decisions(ROOT / "results" / "transcripts", TICKER)
+    signal = agents_signal(
+        decisions.assign(date=pd.to_datetime(decisions["date"]))
+        .set_index("date"),
+        prices.index,
+    )
+    agents = backtest_signals(prices, signal, cost_bps=COST_BPS, rf=RF,
+                              name="agent_desk")
+    curves = {"agent_desk": agents.equity}
+    for name, strat in STRATEGIES.items():
+        res = backtest_signals(prices, strat(prices), cost_bps=COST_BPS, rf=RF,
+                               name=name)
+        curves[name] = res.equity
+    plot_strategy_comparison(
+        curves,
+        f"Strategy Comparison — Cumulative Returns for {TICKER} "
+        f"({START} → {END}, net of {COST_BPS:.0f} bps)",
+        FIG_DIR / "agents_aapl_2026_comparison.png",
+        highlight="agent_desk",
+    )
+    plot_transaction_history(
+        prices, agents.positions,
+        FIG_DIR / "agents_aapl_2026_txn.png",
+        title=f"Agent desk — transaction history for {TICKER} "
+              f"[{START} … {END}]",
+        decisions=decisions, cost_bps=COST_BPS,
+    )
+
+
+def fig_baseline_comparisons() -> None:
+    """Full-history Fig-7 style baseline comparison for three tickers."""
+    for ticker in ("AAPL", "NVDA", "TSLA"):
+        cached = sorted((ROOT / "data" / "cache").glob(f"{ticker}_*.parquet"))
+        if not cached:
+            continue
+        df = pd.read_parquet(cached[0])
+        curves = {}
+        for name, strat in STRATEGIES.items():
+            res = backtest_signals(df, strat(df), cost_bps=COST_BPS, rf=RF,
+                                   name=name)
+            curves[name] = res.equity
+        plot_strategy_comparison(
+            curves,
+            f"Strategy Comparison — Cumulative Returns for {ticker} "
+            f"(2015 → mid-2026, net of {COST_BPS:.0f} bps)",
+            FIG_DIR / f"baselines_comparison_{ticker}.png",
+        )
+
+
 def main() -> None:
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     decisions = load_decisions()
     prices = load_prices()
     fig_agents(prices, decisions)
     fig_baselines_sharpe()
-    print(f"wrote {FIG_DIR / 'agents_aapl_2026.png'}")
-    print(f"wrote {FIG_DIR / 'baselines_sharpe.png'}")
+    fig_paper_style(prices)
+    fig_baseline_comparisons()
+    for name in ("agents_aapl_2026.png", "baselines_sharpe.png",
+                 "agents_aapl_2026_comparison.png", "agents_aapl_2026_txn.png",
+                 "baselines_comparison_AAPL.png"):
+        print(f"wrote {FIG_DIR / name}")
 
 
 if __name__ == "__main__":
