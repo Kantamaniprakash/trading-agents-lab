@@ -9,6 +9,7 @@ REVIEW_FINDINGS.json
 build/
 dist/
 .env
+!.env.example
 .claude/
 results/portfolio.json
 results/live_decisions.csv
