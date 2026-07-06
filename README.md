@@ -111,13 +111,26 @@ Full design rationale and module contracts: [DESIGN.md](DESIGN.md).
 
 ## Quickstart
 
-```bash
-pip install -e .
-python -m pytest tests/ -q          # 62 tests, incl. no-lookahead perturbation tests
+With [uv](https://docs.astral.sh/uv/) (reproducible — installs the exact locked versions CI tests against):
 
-python -m tradinglab.cli download   # 10 tickers, 2015 → today (cached parquet)
-python -m tradinglab.cli baselines  # the paper's 5 rule strategies, full history
-python -m tradinglab.cli train-ml   # LightGBM walk-forward, test window 2021 →
+```bash
+uv sync --locked
+uv run pytest tests/ -q             # 62 tests, incl. no-lookahead perturbation tests
+
+uv run python -m tradinglab.cli download   # 10 tickers, 2015 → today (cached parquet)
+uv run python -m tradinglab.cli baselines  # the paper's 5 rule strategies, full history
+uv run python -m tradinglab.cli train-ml   # LightGBM walk-forward, test window 2021 →
+```
+
+Or with plain pip:
+
+```bash
+pip install -e .[dev]
+python -m pytest tests/ -q
+
+python -m tradinglab.cli download
+python -m tradinglab.cli baselines
+python -m tradinglab.cli train-ml
 ```
 
 ### Running the LLM agents (needs `ANTHROPIC_API_KEY`)
@@ -152,7 +165,7 @@ dependencies, opens your browser at `http://localhost:8501`, and starts the app.
 console window to stop it. On macOS/Linux (or if you prefer the terminal), run:
 
 ```bash
-pip install -r requirements-app.txt
+pip install -r requirements-app.txt   # or: uv sync --locked --extra app
 python -m streamlit run app.py
 ```
 
