@@ -1,2 +1,2 @@
 streamlit>=1.30
-plotly>=5.18
+plotly>=6.8.0
