@@ -34,6 +34,7 @@ from tradinglab.config import (  # noqa: E402
     DATA_CACHE_DIR,
     DEFAULT_TICKERS,
     LLM_CACHE_DIR,
+    PROJECT_ROOT,
     RESULTS_DIR,
     AgentConfig,
     BacktestConfig,
@@ -483,12 +484,17 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
     desk = _build_desk_snapshot_or_exit(args)
     payload = snapshot_to_dict(desk)
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        # ASCII-only on stdout: headlines carry arbitrary characters, and a
+        # Windows pipe (cp1252) would otherwise abort the print mid-document.
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
         return
 
     print(payload["context"])
     print("\n--- Snapshot metadata ---")
-    print(f"ticker: {payload['ticker']}")
+    ticker_line = f"ticker: {payload['ticker']}"
+    if payload["company"]:
+        ticker_line += f" ({payload['company']})"
+    print(ticker_line)
     print(
         f"as of: {payload['as_of']} ({price_phrase(desk)}, "
         f"{payload['history_rows']} daily bars), fetched {payload['fetched_at']}"
@@ -514,6 +520,28 @@ def cmd_desk(args: argparse.Namespace) -> None:
     info = sys.stderr if args.json else sys.stdout
 
     desk = _build_desk_snapshot_or_exit(args)
+
+    # Refuse to spend API credit on data that is known to be bad. Live inputs
+    # were "wanted" when nothing on the command line switched them off.
+    wanted_live = not (args.no_live or args.anonymize or args.date)
+    problems = []
+    if desk.stale:
+        problems.append("the newest bar is stale")
+    if desk.prices_behind:
+        problems.append("the prices are behind the market")
+    if wanted_live and not desk.live:
+        problems.append("Yahoo returned no fundamentals and no headlines")
+    if problems and not args.allow_degraded:
+        print(f"error: not running the desk: {'; '.join(problems)}.", file=sys.stderr)
+        for note in desk.notes:
+            print(f"note: {note}", file=sys.stderr)
+        print(
+            "Nothing was spent. Retry in a minute, or pass --allow-degraded to "
+            "run on this data anyway.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     agent_cfg = AgentConfig(debate_rounds=args.debate_rounds)
     print(
         f"{desk.snapshot.ticker}: running the agent desk as of {desk.as_of} "
@@ -546,7 +574,8 @@ def cmd_desk(args: argparse.Namespace) -> None:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
 
     if args.json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        # ASCII-only on stdout (see cmd_snapshot); the saved file keeps UTF-8.
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
     else:
         print()
         print(render_decision_card(log, desk))
@@ -770,6 +799,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--debate-rounds", type=_positive_int, default=AgentConfig().debate_rounds,
         help="bull/bear exchanges before the verdict (>= 1)",
     )
+    p_dk.add_argument(
+        "--allow-degraded", action="store_true",
+        help="run even when the snapshot is stale, could not be refreshed, or "
+             "came back with no fundamentals and no headlines",
+    )
     p_dk.set_defaults(func=cmd_desk)
 
     p_pr = sub.add_parser(
@@ -796,9 +830,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: parse args, ensure results dir, dispatch."""
+    """CLI entry point: parse args, ensure the data directories, dispatch."""
+    # Text that came from Yahoo or from an LLM can hold any character. On a
+    # console or pipe that cannot encode one, print an escape instead of dying.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="backslashreplace")
+
     args = build_parser().parse_args(argv)
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        for directory in (RESULTS_DIR, DATA_CACHE_DIR):
+            directory.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(
+            f"error: cannot write to {PROJECT_ROOT} ({exc.strerror or exc}). "
+            "Set TRADINGLAB_HOME to a writable directory and rerun.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     args.func(args)
 
 

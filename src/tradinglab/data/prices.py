@@ -107,8 +107,9 @@ def fetch_prices(
         raw = yf.download(ticker, start=start, end=yf_end, auto_adjust=True, progress=False)
         if raw is None or len(raw) == 0:
             raise ValueError(
-                f"No price data returned for ticker '{ticker}' "
-                f"(start={start}, end={end}). Check the symbol and date range."
+                f"Yahoo returned no price data for ticker '{ticker}' "
+                f"(start={start}, end={end}). The symbol or date range may be "
+                "wrong, or Yahoo may be rate-limiting: wait a minute and retry."
             )
         df = _normalize(raw, ticker)
         if df.empty:

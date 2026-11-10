@@ -10,30 +10,21 @@ from __future__ import annotations
 import pandas as pd
 import yfinance as yf
 
-# snapshot key -> yfinance .info key
-_INFO_KEYS = {
-    "trailing_pe": "trailingPE",
-    "forward_pe": "forwardPE",
-    "market_cap": "marketCap",
-    "profit_margins": "profitMargins",
-    "return_on_equity": "returnOnEquity",
-    "debt_to_equity": "debtToEquity",
-    "revenue_growth": "revenueGrowth",
-    "earnings_growth": "earningsGrowth",
+# snapshot key -> (yfinance .info key, label used in notes). One table, so
+# the fields that are fetched and the fields that are reported as missing
+# cannot drift apart.
+_RATIOS = {
+    "trailing_pe": ("trailingPE", "trailing P/E"),
+    "forward_pe": ("forwardPE", "forward P/E"),
+    "market_cap": ("marketCap", "market cap"),
+    "profit_margins": ("profitMargins", "profit margin"),
+    "return_on_equity": ("returnOnEquity", "return on equity"),
+    "debt_to_equity": ("debtToEquity", "debt/equity"),
+    "revenue_growth": ("revenueGrowth", "revenue growth"),
+    "earnings_growth": ("earningsGrowth", "earnings growth"),
 }
-
-
-# Human-readable labels for the ratio fields, in display order.
-RATIO_LABELS = {
-    "trailing_pe": "trailing P/E",
-    "forward_pe": "forward P/E",
-    "market_cap": "market cap",
-    "profit_margins": "profit margin",
-    "return_on_equity": "return on equity",
-    "debt_to_equity": "debt/equity",
-    "revenue_growth": "revenue growth",
-    "earnings_growth": "earnings growth",
-}
+_INFO_KEYS = {name: info_key for name, (info_key, _label) in _RATIOS.items()}
+RATIO_LABELS = {name: label for name, (_info_key, label) in _RATIOS.items()}
 
 
 def missing_ratio_fields(snapshot: dict) -> list[str]:
