@@ -89,7 +89,7 @@ def test_skill_docs_cover_every_workflow():
 def test_documented_command_parses_with_the_real_cli(source, args):
     """A renamed subcommand or flag must fail here, not in a buyer's terminal."""
     argv = shlex.split(args)
-    if "--help" in argv:
+    if "--help" in argv or "--version" in argv:
         with pytest.raises(SystemExit) as exc:
             build_parser().parse_args(argv)
         assert exc.value.code == 0
@@ -112,23 +112,38 @@ def test_every_command_in_the_skill_uses_the_dedicated_environment():
 
 
 def test_skill_json_keys_match_what_the_command_emits():
-    """SKILL.md tells the agent which keys to branch on. Each must exist."""
+    """SKILL.md tells the agent which keys to branch on. Each must exist in
+    what the command really prints."""
+    import numpy as np
+    import pandas as pd
+
+    from tradinglab.agents.desk import build_desk_snapshot
+
+    idx = pd.bdate_range(end="2026-03-13", periods=320)
+    close = 100.0 + np.arange(320) * 0.1
+    df = pd.DataFrame({"open": close, "high": close * 1.01, "low": close * 0.99,
+                       "close": close, "volume": 1e6}, index=idx)
+    desk = build_desk_snapshot("ABC", live=False, df=df,
+                               now=pd.Timestamp("2026-03-13 17:00", tz="America/New_York"))
+    emitted = set(snapshot_to_dict(desk))
     documented = set(re.findall(r"`([a-z_]+)`", (SKILL_DIR / "SKILL.md").read_text("utf-8")))
-    emitted = {
-        "ticker", "company", "as_of", "fetched_at", "last_close", "partial_session", "stale",
-        "prices_behind", "history_rows", "anonymized", "has_fundamentals",
-        "fundamentals_missing", "news_headlines", "notes", "context", "disclaimer",
-    }
-    for key in ("context", "company", "as_of", "fetched_at", "last_close", "partial_session",
-                "stale", "prices_behind", "has_fundamentals", "fundamentals_missing",
-                "news_headlines", "notes", "disclaimer"):
-        assert key in documented and key in emitted
+    for key in ("context", "ticker", "company", "instrument_type", "currency", "as_of",
+                "fetched_at", "last_close", "partial_session", "stale", "prices_behind",
+                "has_fundamentals", "fundamentals_missing", "news_headlines", "notes",
+                "disclaimer"):
+        assert key in documented and key in emitted, key
 
 
 def test_install_is_pinned_to_the_release_this_code_ships_as():
     urls = build_skill.pinned_release_urls()
     assert urls and all(url.endswith(f"/archive/refs/tags/v{__version__}.zip") for url in urls)
     assert build_skill.package_version() == __version__
+    # The setup check compares versions, so a buyer holding an older install
+    # is told to upgrade instead of running old code under new instructions.
+    skill_md = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    assert "~/.tradinglab/venv/bin/tradinglab --version" in skill_md
+    assert f"`tradinglab {__version__}`" in skill_md
+    assert not re.findall(r"`tradinglab (?!%s`)\d+\.\d+\.\d+`" % re.escape(__version__), skill_md)
     listing = (REPO_ROOT / "skill" / "LISTING.md").read_text(encoding="utf-8")
     assert f"archive/refs/tags/v{__version__}.zip" in listing and f"git tag v{__version__}" in listing
     assert "archive/refs/heads/" not in listing
@@ -290,7 +305,7 @@ def test_validate_rejects_a_pin_that_disagrees_with_the_package_version(tmp_path
         build_skill.validate(_make_skill(tmp_path / "b"), version="0.2.0")
 
 
-def test_main_refuses_to_build_when_the_release_cannot_be_downloaded(monkeypatch, tmp_path, capsys):
+def test_main_checks_the_release_before_it_writes_anything(monkeypatch, tmp_path, capsys):
     """Uploading before the tag exists would break every buyer's install."""
     monkeypatch.setattr(build_skill, "DIST_DIR", tmp_path)
     monkeypatch.setattr(build_skill, "release_is_downloadable", lambda url: (False, "HTTP 404"))
@@ -300,10 +315,95 @@ def test_main_refuses_to_build_when_the_release_cannot_be_downloaded(monkeypatch
     assert "cannot be downloaded (HTTP 404)" in capsys.readouterr().err
 
     monkeypatch.setattr(build_skill, "release_is_downloadable", lambda url: (True, "HTTP 200"))
-    monkeypatch.setattr(build_skill, "build",
-                        lambda: build_skill.__dict__["_real_build"](dist_dir=tmp_path))
     build_skill.main([])
     assert (tmp_path / "trading-agents-desk.zip").is_file()
 
 
-build_skill._real_build = build_skill.build
+def test_main_skip_remote_check_builds_offline_and_warns(monkeypatch, tmp_path, capsys):
+    def no_network(url):
+        raise AssertionError("--skip-remote-check must not touch the network")
+
+    monkeypatch.setattr(build_skill, "DIST_DIR", tmp_path)
+    monkeypatch.setattr(build_skill, "release_is_downloadable", no_network)
+    build_skill.main(["--skip-remote-check"])
+    captured = capsys.readouterr()
+    assert (tmp_path / "trading-agents-desk.zip").is_file()
+    assert "was NOT checked" in captured.err and "Do not upload" in captured.err
+
+
+def test_release_is_downloadable_reports_what_the_server_said(monkeypatch):
+    url = "https://example.invalid/archive/refs/tags/v9.9.9.zip"
+    seen: list = []
+
+    class Response:
+        def __init__(self, status):
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def answer(status):
+        def urlopen(request, timeout):
+            seen.append((request.get_method(), request.full_url))
+            return Response(status)
+        return urlopen
+
+    def fail(error):
+        def urlopen(request, timeout):
+            raise error
+        return urlopen
+
+    monkeypatch.setattr(build_skill.urllib.request, "urlopen", answer(200))
+    assert build_skill.release_is_downloadable(url) == (True, "HTTP 200")
+    assert seen == [("HEAD", url)]
+    monkeypatch.setattr(build_skill.urllib.request, "urlopen", answer(304))
+    assert build_skill.release_is_downloadable(url) == (False, "HTTP 304")
+    not_found = build_skill.urllib.error.HTTPError(url, 404, "Not Found", None, None)
+    monkeypatch.setattr(build_skill.urllib.request, "urlopen", fail(not_found))
+    assert build_skill.release_is_downloadable(url) == (False, "HTTP 404")
+    monkeypatch.setattr(build_skill.urllib.request, "urlopen",
+                        fail(build_skill.urllib.error.URLError("no route to host")))
+    assert build_skill.release_is_downloadable(url) == (False, "no route to host")
+
+
+def test_the_real_skill_is_validated_against_pyproject_without_being_told(monkeypatch):
+    """``python skill/build_skill.py`` passes no version: validate() must look
+    it up itself, or a stale pin ships."""
+    monkeypatch.setattr(build_skill, "package_version", lambda: "9.9.9")
+    with pytest.raises(ValueError, match="pin v9.9.9"):
+        build_skill.validate()
+
+
+def test_a_branch_install_hidden_in_a_reference_file_is_rejected(tmp_path):
+    skill = _make_skill(tmp_path, body="pip install " + URL.format(ref="tags/v0.2.0"))
+    (skill / "references").mkdir()
+    (skill / "references" / "more.md").write_text(
+        "pip install " + URL.format(ref="heads/main"), encoding="utf-8")
+    with pytest.raises(ValueError, match="installs from a branch"):
+        build_skill.validate(skill, version="0.2.0")
+
+
+def test_archive_member_order_does_not_depend_on_the_platform(tmp_path):
+    """Windows and POSIX sort path separators and letter case differently.
+    Members are ordered by their archive name, so the bytes match anywhere."""
+    skill = _make_skill(tmp_path)
+    (skill / "Zeta.txt").write_text("z\n")
+    (skill / "alpha.txt").write_text("a\n")
+    (skill / "references").mkdir()
+    (skill / "references" / "guide.md").write_text("g\n")
+    (skill / "references-extra.md").write_text("e\n")
+    with zipfile.ZipFile(build_skill.build(skill, tmp_path / "out")) as archive:
+        names = [name.split("/", 1)[1] for name in archive.namelist()]
+    assert names == sorted(names) == ["SKILL.md", "Zeta.txt", "alpha.txt",
+                                      "references-extra.md", "references/guide.md"]
+
+
+@pytest.mark.parametrize("value", ["true", "No", "null", "~", "42", "1.5", "1e3", "2026-01-01"])
+def test_frontmatter_values_yaml_would_not_read_as_text_are_rejected(tmp_path, value):
+    skill = _make_skill(tmp_path, frontmatter=f"---\nname: demo-skill\ndescription: {value}\n---\n",
+                        body="")
+    with pytest.raises(ValueError, match="would not read the value"):
+        build_skill.validate(skill)

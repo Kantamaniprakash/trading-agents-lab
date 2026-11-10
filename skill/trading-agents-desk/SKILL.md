@@ -52,15 +52,19 @@ rules below are strict about what this output is.
 ## Setup (once per machine)
 
 The package runs from its own virtual environment, so nothing is installed
-into the user's project. First check whether it is already there:
+into the user's project. First check which version is there:
 
 ```bash
-~/.tradinglab/venv/bin/tradinglab snapshot --help
+~/.tradinglab/venv/bin/tradinglab --version
 ```
 
-If that prints the options and lists `--ticker`, skip to Workflow 1.
-Otherwise create the environment and install the pinned release. This needs
-Python 3.10+ and network access to GitHub and PyPI, and takes a minute or two.
+- It prints `tradinglab 0.2.0`: setup is done. Skip to Workflow 1.
+- It prints another version, or an error about `--version`: an older copy is
+  installed. Run the install command below with `--upgrade` added.
+- The file does not exist: create the environment, then install.
+
+Installing needs Python 3.10+ and network access to GitHub and PyPI, and
+takes a minute or two.
 
 ```bash
 python3 -m venv ~/.tradinglab/venv
@@ -75,14 +79,17 @@ Then run the check again. Notes for setup:
 - Call the program by its full path every time. Agent shells start fresh for
   each command, so do not rely on `activate`. On Windows the path is
   `%USERPROFILE%\.tradinglab\venv\Scripts\tradinglab.exe`.
-- If the check runs but says `invalid choice: 'snapshot'`, an older copy is
-  installed. Run the install command again with `--upgrade`.
+- If the home directory is not writable, create the environment in a folder
+  that is, and use that path in every command instead.
 - Caches and results go to `~/.tradinglab`. If an error says it cannot write
   there, put `TRADINGLAB_HOME=<a writable folder>` in front of the command,
-  on the same line, every time.
-- Market data comes from Yahoo Finance. Yahoo prints warnings such as
-  "Crumb fetch rate-limited" on stderr. They are not errors. Judge a run by
-  its exit code and its JSON.
+  on the same line, every time. That variable moves the caches and results,
+  not the environment.
+- Market data comes from Yahoo Finance through the unofficial `yfinance`
+  library, which is not affiliated with or endorsed by Yahoo. The user's use
+  of the data is subject to Yahoo's terms.
+- Yahoo prints warnings such as "Crumb fetch rate-limited" on stderr. They
+  are not errors. Judge a run by its exit code and its JSON.
 - The default workflow needs no API key.
 
 ## Workflow 1: desk analysis (default)
@@ -97,10 +104,13 @@ sell or hold?".
 ```
 
 If the exit code is not zero, read the stderr line that starts with `error:`.
+It says which of these happened.
 
-- "Yahoo returned no price data": Yahoo is probably rate-limiting. Wait 60
-  seconds and run the command once more. If it fails again, tell the user
-  that Yahoo did not answer and that the symbol may also be wrong. Stop.
+- "Yahoo does not know this symbol": tell the user the symbol was not found
+  and stop. Do not retry.
+- "Yahoo is rate-limiting", or "no reason was given": wait 60 seconds and run
+  the command once more. If it fails again, tell the user what the message
+  says and stop.
 - "cannot write to": use `TRADINGLAB_HOME` as described in Setup.
 - Anything else: report the message and stop.
 
@@ -108,11 +118,12 @@ On success stdout is one JSON document with these keys.
 
 | Key | What to do with it |
 |---|---|
-| `context` | The evidence. It is everything the desk may cite. When the data has a problem it opens with a "Data notes" section, and every role must read the tables in the light of those notes. |
+| `context` | The evidence. It is everything the desk may cite. When something changes how the tables must be read (an unfinished session, old or lagging prices, incomplete fundamentals, a non-dollar currency) it opens with a "Data notes" section, and every role must read the tables in the light of those notes. A block that is missing altogether is simply absent. |
 | `ticker`, `company` | Report header. `company` is Yahoo's name for the symbol and may be null. |
+| `instrument_type`, `currency` | What kind of instrument it is (`EQUITY`, `ETF`, `CRYPTOCURRENCY`, ...) and what the prices are quoted in. Either may be null. |
 | `as_of`, `fetched_at`, `last_close` | Report header. `as_of` is the date of the newest bar. `fetched_at` is when the prices were downloaded, in UTC. |
 | `partial_session` | `true`: the newest bar is an unfinished trading day, so `last_close` is the latest price, not a close. `false`: it is a close. `null`: it could not be established. |
-| `stale` | `true`: the newest bar is days old. |
+| `stale` | `true`: the newest bar is about two weeks old or more. |
 | `prices_behind` | `true`: newer prices exist or may exist than the snapshot shows. |
 | `has_fundamentals`, `fundamentals_missing` | Whether there is a fundamentals block, and which of its figures are absent. |
 | `news_headlines` | How many headlines the snapshot holds. |
@@ -126,11 +137,12 @@ On success stdout is one JSON document with these keys.
 - **`prices_behind` is true:** wait 60 seconds and fetch once more. If it is
   still true, stop and tell the user what the note says. Continue only if
   the user asks, and then say in the report header that prices are behind.
-- **`has_fundamentals` is false, `fundamentals_missing` is not empty, or
-  `news_headlines` is 0:** Yahoo may have rate-limited the request. Wait 30
-  seconds and fetch once more. Keep whichever result has fewer gaps. Do not
-  retry a second time. Funds, crypto and some foreign listings never have
-  these figures, and that is fine.
+- **`news_headlines` is 0, or the fundamentals have gaps
+  (`has_fundamentals` is false or `fundamentals_missing` is not empty) and
+  `instrument_type` is `EQUITY` or null:** Yahoo may have rate-limited the
+  request. Wait 30 seconds and fetch once more. Keep whichever result has
+  fewer gaps. Do not retry a second time. Funds, crypto, indices and
+  currencies never have company fundamentals, so do not retry for those.
 - **Still no fundamentals block:** skip the fundamentals analyst.
 - **Still no headlines:** skip the news and sentiment analysts. If you have a
   web search tool you may instead collect up to 8 recent headlines (date,
@@ -140,6 +152,9 @@ On success stdout is one JSON document with these keys.
   and tell the user that every indicator will move by the close. If it is
   `null`, write "last price, session status unknown" and treat the newest
   bar as provisional.
+- **Report while the data is fresh.** If `partial_session` is not `false`
+  and more than 30 minutes have passed since `fetched_at` by the time you
+  write the report, fetch again first.
 - **Several tickers:** run them one at a time and leave about 20 seconds
   between fetches. Say that the desk has no portfolio-level view: the
   decisions are independent.
@@ -151,13 +166,14 @@ role, the inputs each role may see, the output formats and the indicator
 conventions. The order is fixed: analysts, two bull/bear rounds and a
 facilitator verdict, the trader, one risk round, the fund manager.
 
-Keep the roles independent. If you can spawn subagents, give Bull, Bear and
-each risk analyst their own subagent with only the inputs listed for that
-role and the evidence rule from `references/roles.md`. Start each one without
-tools where the host allows, and tell it to call none. Otherwise write the
-turns one at a time, and in each turn use only that role's listed inputs.
-Either way, say in the report how the seats were run: a single context
-cannot fully un-see earlier turns.
+Keep the roles independent. If you can spawn subagents, give Bull, Bear, each
+risk analyst and the fund manager their own subagent with that role's brief,
+the evidence rule from `references/roles.md` and only the inputs listed for
+the role. Start each one without tools where the host allows, and tell it to
+call none. Otherwise write the turns one at a time, and in each turn use
+only that role's listed inputs. Either way, name in the report every seat
+that did not run in its own context: a single context cannot fully un-see
+earlier turns.
 
 Keep every analyst report, debate turn and risk comment in your working notes
 or a scratch file. The report below is a summary, and the user may ask for
@@ -174,11 +190,13 @@ Use this template. Tell the user the full analyst reports and debate are
 available, and show them when asked.
 
 ```markdown
-## <TICKER> (<company>) desk view, as of <as_of> (<"close" or "last price"> <last_close>, prices fetched <fetched_at>)
+## <TICKER> (<company>) desk view, as of <as_of> (<"close" or "last price"> <last_close> <currency>, prices fetched <fetched_at>)
 
 **Simulated desk decision: <BUY size | SELL size | HOLD>** (<what the desk would do with its own paper book>)
+
 **Research verdict:** <BULLISH|BEARISH|NEUTRAL>. <One or two sentences from the facilitator.>
-**Trader vs verdict:** <Only when the action departs from the verdict: one sentence saying why.>
+
+**Trader vs verdict:** <Only when the action departs from the verdict: one sentence saying why. Otherwise leave this line out.>
 
 ### Why
 - **Bull:** <Strongest bull evidence, with figures from the snapshot.>
@@ -189,7 +207,7 @@ available, and show them when asked.
 - <Two or three concrete, observable conditions.>
 
 ### Data notes
-- <Each problem from `notes`, any analysts skipped, where headlines came from, how the seats were run, and that the desk started from no position.>
+- <Each item from `notes`, any analysts skipped, where headlines came from, which seats did not run in their own context, and that the desk started from no position.>
 
 <disclaimer>
 ```
@@ -251,6 +269,10 @@ One rule matters here. Do not run Workflow 1 on a past date to see how the
 desk "would have done". You may remember what happened next, and so the
 result measures memory, not skill. Historical evaluation must go through
 `agents --anonymize` and `probe`, which exist for exactly this problem.
+
+End any reply that reports backtest figures with this line: "Research
+output, not investment advice. A backtest is not proof that a strategy will
+make money."
 
 ## Guardrails
 

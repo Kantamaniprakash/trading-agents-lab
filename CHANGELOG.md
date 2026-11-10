@@ -16,19 +16,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a JSON record under `results/desk/`. It exits before any LLM call when the snapshot
   is stale, prices are behind, or live data was wanted and none came back
   (`--allow-degraded` overrides).
-- Data-quality reporting on the desk path. Prices are downloaded fresh for every snapshot
-  (a download under 15 minutes old is reused) into a desk-only cache folder. Whether the
-  newest bar is an unfinished session is decided on the exchange's own clock and reported
-  as `true`, `false` or unknown. A stale bar, prices that could not be refreshed, a newest
-  session Yahoo returned no usable bar for, and empty or incomplete fundamentals each
-  produce a note, and the notes that change how the data must be read are written into the
-  prompt as well (`MarketSnapshot.data_notes`).
+- Data-quality reporting for the `snapshot` and `desk` commands. Prices are downloaded
+  fresh for every snapshot (a download under 15 minutes old is reused) into a desk-only
+  cache folder. Whether the newest bar is an unfinished session is decided on the
+  exchange's own clock, cross-checked against Yahoo's last-trade time, and reported as
+  `true`, `false` or unknown. An old or stale bar, prices that could not be refreshed, a
+  newest session Yahoo returned no usable bar for, a non-dollar currency, and empty or
+  incomplete fundamentals each produce a note, and the notes that change how the data
+  must be read are written into the prompt as well (`MarketSnapshot.data_notes`).
+  The dashboard's AI Trading Desk and `agents --live` do not have these guards yet: they
+  still refresh prices on cache age alone and still hand a failed fundamentals fetch to
+  the fundamentals analyst as text.
 - Agent skill in `skill/trading-agents-desk/` (a `SKILL.md` plus role briefs and a harness
   reference) that lets Claude Code, Codex, Cursor and similar agents run the desk
   themselves from a snapshot. `skill/build_skill.py` packages it as a ZIP and refuses to
   when the release tag the skill installs from cannot be downloaded; `skill/LISTING.md`
   has marketplace listing copy.
-- A `tradinglab` console command, equivalent to `python -m tradinglab.cli`.
+- A `tradinglab` console command, equivalent to `python -m tradinglab.cli`, and a
+  `--version` flag.
 
 ### Changed
 - Caches and results resolve to `TRADINGLAB_HOME` when set, the source checkout when
@@ -39,8 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   large. This changes the live prompts of `agents --live` and the dashboard desk.
 - Headlines are collapsed to a single line of at most 200 characters, so third-party text
   cannot pose as a section of the prompt.
-- The error for an empty price download no longer blames the symbol alone: Yahoo answers
-  rate-limited requests the same way.
+- An empty price download raises `PriceDataError` (still a `ValueError`) whose message and
+  `reason` say whether Yahoo was rate-limiting or did not know the symbol. It used to
+  blame the symbol in both cases.
+- A price cache directory that cannot be written is a warning, not an error: prices that
+  were downloaded are still returned.
 
 ### Fixed
 - `--anonymize` no longer rewrites the tables for tickers that are also words or labels.

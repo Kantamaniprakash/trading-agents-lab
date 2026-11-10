@@ -34,6 +34,12 @@ _FIXED_TIMESTAMP = (2026, 1, 1, 0, 0, 0)
 # A plain YAML scalar must not start with an indicator character, and ": " or
 # " #" inside it would be read as a mapping or a comment.
 _YAML_UNSAFE_START = tuple("!&*[]{}>|@`'\"%#,?-")
+# Plain scalars that YAML resolves to something other than a string.
+_YAML_NON_STRING = re.compile(
+    r"(?i)(true|false|yes|no|on|off|null|~|y|n"
+    r"|[-+]?(\d[\d_]*)?\.?\d+([eE][-+]?\d+)?|0x[0-9a-f]+|0o[0-7]+"
+    r"|[-+]?\.(inf|nan)|\d{4}-\d{1,2}-\d{1,2}([Tt ].*)?)"
+)
 _RELEASE_URL_RE = re.compile(
     r"https://github\.com/Kantamaniprakash/trading-agents-lab/archive/refs/tags/"
     r"(v[0-9][0-9A-Za-z.\-]*)\.zip"
@@ -65,6 +71,11 @@ def read_frontmatter(skill_md: Path) -> dict[str, str]:
             raise ValueError(
                 f"{skill_md}: the value of {key.strip()!r} is not a plain YAML scalar "
                 "(it starts with an indicator character, or contains ': ' or ' #')"
+            )
+        if _YAML_NON_STRING.fullmatch(value):
+            raise ValueError(
+                f"{skill_md}: YAML would not read the value of {key.strip()!r} as text "
+                f"({value!r} is a boolean, null, number or date to a YAML parser)"
             )
         if key.strip() in fields:
             raise ValueError(f"{skill_md}: duplicate frontmatter key {key.strip()!r}")
@@ -105,14 +116,17 @@ def _packaged_files(skill_dir: Path) -> list[Path]:
     """Regular files to ship, sorted; hidden files, hidden folders, caches and
     symlinks are left out."""
     files = []
-    for path in sorted(skill_dir.rglob("*")):
+    for path in skill_dir.rglob("*"):
         relative = path.relative_to(skill_dir)
         if path.is_symlink() or not path.is_file():
             continue
         if any(part.startswith(".") or part == "__pycache__" for part in relative.parts):
             continue
         files.append(path)
-    return files
+    # Sort on the archive name, not the native path: Windows and POSIX order
+    # separators and letter case differently, and member order is part of the
+    # bytes.
+    return sorted(files, key=lambda path: path.relative_to(skill_dir).as_posix())
 
 
 def validate(skill_dir: Path = SKILL_DIR, version: str | None = None) -> list[Path]:
@@ -166,9 +180,10 @@ def validate(skill_dir: Path = SKILL_DIR, version: str | None = None) -> list[Pa
     return files
 
 
-def build(skill_dir: Path = SKILL_DIR, dist_dir: Path = DIST_DIR,
+def build(skill_dir: Path = SKILL_DIR, dist_dir: Path | None = None,
           version: str | None = None) -> Path:
     """Validate ``skill_dir`` and write ``{dist_dir}/{skill name}.zip``."""
+    dist_dir = DIST_DIR if dist_dir is None else dist_dir
     files = validate(skill_dir, version=version)
     dist_dir.mkdir(parents=True, exist_ok=True)
     out_path = dist_dir / f"{skill_dir.name}.zip"

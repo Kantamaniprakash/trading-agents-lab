@@ -173,22 +173,30 @@ python -m tradinglab.cli desk --ticker NVDA
 The rule on this path is that a data problem is never analysed silently:
 
 - **Prices are downloaded fresh** on every snapshot (a download under 15 minutes old is
-  reused). If Yahoo returns nothing, the previous download is shown and flagged
-  `prices_behind`. Desk downloads live in their own cache folder, so an intraday bar can
-  never reach a backtest through a shared price file.
+  reused, unless it is already known to be missing the newest session). If Yahoo returns
+  nothing, the previous download is shown and flagged `prices_behind`. Desk downloads
+  live in their own cache folder, so an intraday bar can never reach a backtest through
+  a shared price file.
 - **An unfinished session is labelled as one.** Whether the newest bar is final is
-  decided on the exchange's own clock (Tokyo, crypto and US half-days included). When
-  that cannot be established it is reported as unknown, not assumed to be a close.
-- **Gaps are named.** A stale bar, and fundamentals that Yahoo returned empty or
-  incomplete (its usual answer when rate-limiting), each produce a note. The notes that
-  change how the numbers must be read also go at the top of the agents' prompt.
+  decided on the exchange's own clock (Tokyo, crypto and US half-days included), and
+  Yahoo's calendar is cross-checked against its own last-trade time, because the calendar
+  has been seen an hour early with trades still printing. When the answer cannot be
+  established it is reported as unknown, not assumed to be a close.
+- **Gaps are named.** An old bar (noted after 5 days, called stale after 12, which is
+  longer than any scheduled exchange closure), a non-dollar currency, and fundamentals
+  that Yahoo returned empty or incomplete (its usual answer when rate-limiting) each
+  produce a note. The notes that change how the numbers must be read also go at the top
+  of the agents' prompt.
+- **An empty price download says why.** Yahoo answers a rate limit and an unknown symbol
+  with the same empty frame; the error now tells them apart, since one calls for a retry
+  and the other does not.
 - **Past dates never receive fundamentals or news.** Yahoo serves current values only,
   so they would leak the future. `snapshot --date 2026-03-09 --anonymize` shows the
   masked block a backtest decision day is given today (the published AAPL run predates
   the price rebasing, so its prompts differed).
 - **`desk` will not spend API credit on bad data.** It exits before any LLM call when
-  the snapshot is stale, prices are behind, or live data was wanted and none came back;
-  `--allow-degraded` overrides. It saves a transcript and a JSON record under
+  the snapshot is stale, prices are behind, live data was asked for and none came back,
+  or the results folder cannot be written; `--allow-degraded` overrides the first three. It saves a transcript and a JSON record under
   `results/desk/`. A repeat is only free when prices, fundamentals and headlines all come
   back unchanged, which during market hours they never do.
 
@@ -344,7 +352,7 @@ Findings a 3-month backtest could never show:
 
 ## Verification
 
-- 187 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
+- 260 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
   future rows → assert all earlier features/indicators/engine outputs are bit-identical).
 - A five-dimension adversarial review pass (lookahead, statistics, costs, data hygiene,
   prompt leakage — every finding independently re-verified before acceptance) surfaced

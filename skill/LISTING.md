@@ -93,7 +93,9 @@ paper (Xiao et al., arXiv:2412.20138). It is not the paper authors' code.
 
 No API key or data subscription is needed for the default workflow. Market
 data is Yahoo Finance daily bars fetched by your own machine, and your own
-agent does the reasoning. The snapshot says when the newest bar is an
+agent does the reasoning. It uses the unofficial yfinance library and is not
+affiliated with or endorsed by Yahoo; your use of the data is subject to
+Yahoo's terms. The snapshot says when the newest bar is an
 unfinished session, when data is stale and when Yahoo returned gaps, and the
 skill tells your agent what to do in each case.
 
@@ -137,7 +139,7 @@ research simulation
 | Terminal | Creates a virtual environment, runs `pip install` once, and runs the `tradinglab` command. |
 | Network | Downloads the package from GitHub (the archive URL redirects to codeload.github.com), its Python dependencies from PyPI, and public market data from Yahoo Finance. The optional API workflows call the Anthropic API. |
 | File write | A dedicated virtual environment, price cache and results, all under `~/.tradinglab`. The standard per-user cache folders of pip, matplotlib and yfinance are also written. Nothing is written to the project directory. |
-| Environment variables | None are required for the default workflow. `TRADINGLAB_HOME` optionally moves the data folder. The optional API workflows let the Anthropic SDK read `ANTHROPIC_API_KEY`; the skill never reads, prints or transmits it itself. |
+| Environment variables | None are required for the default workflow. `TRADINGLAB_HOME` optionally moves the data folder. The optional API workflows let the Anthropic SDK read `ANTHROPIC_API_KEY`; the skill never reads, prints or transmits it itself. `TRADINGLAB_QUICK_MODEL` and `TRADINGLAB_DEEP_MODEL` optionally change the models those workflows use. |
 
 The ZIP ships no scripts, so there is nothing for the marketplace to execute
 from a temporary file.
@@ -145,8 +147,8 @@ from a temporary file.
 ## Pricing
 
 Start at **$5 one-time**. On Agensi you keep 70% of the net sale price
-excluding VAT, about $3.50 a sale, and $5 is the lowest price a buyer can pay
-by card. Agensi's terms let it change that split with 30 days' notice.
+excluding VAT, at most $3.50 a sale, and $5 is the lowest price a buyer can
+pay by card. Agensi's terms let it change that split with 30 days' notice.
 
 Starting paid is the reversible choice. Moving a listing from paid to free
 is painless and past buyers keep access. Moving from free to paid forces
@@ -169,9 +171,14 @@ so if a buyer asks.
 ## Data source note
 
 Market data comes from Yahoo Finance through `yfinance`, an unofficial
-open-source library that is not affiliated with Yahoo. Its own documentation
-says it is intended for research and educational purposes and refers users to
-Yahoo's terms of use. The skill redistributes no data: each buyer's own
-machine fetches it. That is a reasonable footing for a low-priced research
-tool. A higher-priced or commercial offering should move to a licensed data
-source.
+open-source library that is not affiliated with, endorsed or vetted by Yahoo.
+Its own documentation says it is intended for research and educational
+purposes, refers users to Yahoo's terms of use, and says Yahoo's finance API
+is intended for personal use only.
+
+The skill redistributes no data: each buyer's own machine fetches it for that
+buyer's own use. Even so, a paid listing is a commercial product at any
+price, and those terms do not clearly allow one to be built on this data.
+This is the weakest point of a paid listing. Read Yahoo's terms, or move to a
+licensed data source, before taking payment. A free listing carries less of
+this risk.

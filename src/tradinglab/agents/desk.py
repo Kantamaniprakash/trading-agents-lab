@@ -15,6 +15,7 @@ the numbers must be read are written into the prompt as well.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -34,9 +35,13 @@ DISCLAIMER = (
     "buy-and-hold in the project's one-ticker, one-quarter test."
 )
 
-# A newest bar older than this many calendar days is flagged as stale
-# (long weekends and holidays stay under it; halted or delisted symbols do not).
-_STALE_AFTER_DAYS = 5
+# A newest bar older than this many calendar days is flagged as stale, which
+# also stops the paid desk. The longest scheduled exchange closures (Lunar New
+# Year in Shanghai and Taipei) run to about twelve days, so anything older has
+# no innocent explanation. Between the two thresholds the age is only noted:
+# it may be a holiday week, or the symbol may be halted.
+_STALE_AFTER_DAYS = 12
+_OLD_BAR_NOTE_DAYS = 5
 # Yahoo rate-limits bursts and then answers with empty payloads rather than
 # errors. One short pause and a second attempt recovers most of those.
 _RETRY_WAIT_S = 6.0
@@ -45,6 +50,12 @@ _RETRY_WAIT_S = 6.0
 _PRICE_REUSE_S = 15 * 60
 # After the regular close, the closing print takes a few minutes to settle.
 _SETTLE = pd.Timedelta(minutes=15)
+# Yahoo's quotes for many venues run 10 to 20 minutes behind. Until this long
+# after the close, a last trade stamped before the close may just be the delay.
+_MAX_FEED_DELAY = pd.Timedelta(minutes=30)
+# If trades are still arriving after the calendar's close, the calendar is
+# wrong for that session. Once none has arrived for this long, it is over.
+_FEED_QUIET = pd.Timedelta(minutes=45)
 # Desk downloads are kept apart from the research cache: they can end in an
 # intraday bar, which must never reach a backtest through a shared file.
 _DESK_CACHE_SUBDIR = "desk"
@@ -83,8 +94,9 @@ class LatestPrices:
     df: pd.DataFrame
     downloaded_at: pd.Timestamp          # tz-aware UTC
     # Exchange facts captured with the download: {"exchange_tz",
-    # "instrument_type", "regular_end" (UTC ISO), "last_trade" (UTC ISO or
-    # None), "name"}; None when Yahoo's chart metadata could not be read.
+    # "instrument_type", "currency", "regular_end" (UTC ISO), "last_trade"
+    # (UTC ISO or None), "name"}; None when Yahoo's chart metadata could not
+    # be read.
     session: dict | None = None
     # True when Yahoo returned nothing now and ``df`` is an earlier download.
     refresh_failed: bool = False
@@ -115,9 +127,11 @@ def _fetch_session_info(ticker: str) -> dict | None:
             last_trade = pd.Timestamp(int(traded), unit="s", tz="UTC").isoformat()
         else:
             last_trade = None
+        currency = meta.get("currency")
         return {
             "exchange_tz": exchange_tz,
             "instrument_type": str(meta.get("instrumentType") or ""),
+            "currency": str(currency) if currency else None,
             "regular_end": regular_end.isoformat(),
             "last_trade": last_trade,
             "name": str(name) if name else None,
@@ -137,13 +151,43 @@ def _read_cached_prices(cache_file: Path, meta_file: Path) -> LatestPrices | Non
         return None
     try:
         meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        # The sidecar must describe THIS price file. A run interrupted between
+        # the two writes leaves new prices beside an old sidecar, whose download
+        # time and calendar would then be applied to the wrong bar.
+        if meta["last_bar"] != df.index[-1].strftime("%Y-%m-%d"):
+            raise ValueError("sidecar belongs to a different download")
         downloaded_at = _utc(pd.Timestamp(meta["downloaded_at"]))
         session = meta.get("session") if isinstance(meta.get("session"), dict) else None
     except Exception:
-        # No sidecar: the file's own timestamp is the best record there is.
+        # No usable sidecar: the file's own timestamp is the best record there is.
         downloaded_at = pd.Timestamp(cache_file.stat().st_mtime, unit="s", tz="UTC")
         session = None
     return LatestPrices(df=df, downloaded_at=downloaded_at, session=session)
+
+
+def _write_sidecar(meta_file: Path, df: pd.DataFrame, downloaded_at: pd.Timestamp,
+                   session: dict | None) -> None:
+    """Record when ``df`` was downloaded and the exchange facts that came with it.
+
+    Written through a temporary file so a reader never sees half a document.
+    The cache is a convenience: if it cannot be written the sidecar is removed
+    (no sidecar is safe, a stale one is not) and the run carries on.
+    """
+    payload = {
+        "downloaded_at": downloaded_at.isoformat(),
+        "last_bar": df.index[-1].strftime("%Y-%m-%d"),
+        "session": session,
+    }
+    tmp = meta_file.with_name(meta_file.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, meta_file)
+    except OSError:
+        for leftover in (tmp, meta_file):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
 
 
 def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
@@ -151,11 +195,13 @@ def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
     """Daily history for ``ticker`` up to the newest bar Yahoo has right now.
 
     The desk does not trust an old price file. Prices are downloaded on every
-    call unless the previous download is younger than ``_PRICE_REUSE_S``. An
-    empty answer (Yahoo's response to rate limiting) is retried once. If it
-    is still empty and an earlier download is on disk, that is returned with
+    call unless the previous download is younger than ``_PRICE_REUSE_S`` and
+    is not already known to be missing the newest session. An empty answer
+    (Yahoo's response to rate limiting) is retried once. If it is still empty
+    and an earlier download is on disk, that is returned with
     ``refresh_failed=True`` so the caller can say the prices may be behind.
-    With nothing on disk the ``ValueError`` from ``fetch_prices`` propagates.
+    With nothing on disk, or when Yahoo says the symbol does not exist, the
+    ``ValueError`` from ``fetch_prices`` propagates.
     """
     now = _utc(now)
     start = DataConfig().start
@@ -166,14 +212,20 @@ def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
     cached = _read_cached_prices(cache_file, meta_file)
     if cached is not None:
         age = (now - cached.downloaded_at).total_seconds()
-        if 0 <= age < _PRICE_REUSE_S:
+        traded = _last_trade_day(cached)
+        behind = traded is not None and traded > cached.df.index[-1].date()
+        # age < 0 is a download stamped in the future (clock changed, cache
+        # copied between machines): its timestamp says nothing, so refresh.
+        if 0 <= age < _PRICE_REUSE_S and not behind:
             return cached
 
     for attempt in (1, 2):
         try:
             df = fetch_prices(ticker, start, None, cache_dir=root, force=True)[ticker]
             break
-        except ValueError:
+        except ValueError as exc:
+            if getattr(exc, "reason", "") == "not_found":
+                raise  # a retry cannot make an unknown symbol exist
             if attempt == 1:
                 time.sleep(_RETRY_WAIT_S)
                 continue
@@ -181,46 +233,73 @@ def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
                 return replace(cached, refresh_failed=True)
             raise
 
+    # Stamp the new prices at once, so an interruption during the metadata
+    # request below cannot leave them paired with the previous run's sidecar.
+    _write_sidecar(meta_file, df, now, None)
     session = _fetch_session_info(ticker)
-    meta_file.write_text(
-        json.dumps({"downloaded_at": now.isoformat(), "session": session}, indent=2),
-        encoding="utf-8",
-    )
+    if session is not None:
+        _write_sidecar(meta_file, df, now, session)
     return LatestPrices(df=df, downloaded_at=now, session=session)
 
 
 def _last_bar_is_partial(ticker: str, as_of: pd.Timestamp,
-                         prices: LatestPrices) -> bool | None:
+                         prices: LatestPrices) -> tuple[bool | None, str]:
     """Was the newest bar an unfinished session when it was downloaded?
 
-    True or False when that can be established, None when it cannot. Yahoo
-    dates a daily bar by the exchange's local day and includes the session in
-    progress, so the question needs the exchange's own clock. With Yahoo's
-    calendar that is exact (it also covers half-days). Without it, only
-    plainly old bars and US-style symbols are decided; anything else is
-    reported as unknown, never guessed as finished.
+    Returns ``(state, reason)``. ``state`` is True or False when that can be
+    established and None when it cannot; ``reason`` then says why:
+    ``"no_calendar"`` or ``"calendar_contradicted"``.
+
+    Yahoo dates a daily bar by the exchange's local day and includes the
+    session in progress, so the question needs the exchange's own clock.
+    Yahoo's calendar supplies it, including half-days, but it is not gospel:
+    it has been seen an hour early for a venue, with trades still printing.
+    The last-trade time from the same response is therefore used as a
+    cross-check. Without a calendar, only plainly old bars and US-style
+    symbols are decided. Anything else is reported as unknown, never guessed
+    as finished.
     """
     downloaded = prices.downloaded_at
     bar_day = as_of.date()
     session = prices.session
     if session:
-        if bar_day != downloaded.tz_convert(session["exchange_tz"]).date():
-            return False
+        local_day = downloaded.tz_convert(session["exchange_tz"]).date()
+        if bar_day < local_day:
+            return False, ""
+        if bar_day > local_day:
+            return True, ""  # a bar that began after the download started
         if session.get("instrument_type") == "CRYPTOCURRENCY":
-            return True  # trades around the clock: today's bar is never final
-        return bool(downloaded < pd.Timestamp(session["regular_end"]) + _SETTLE)
+            return True, ""  # trades around the clock: today's bar is never final
+        end = pd.Timestamp(session["regular_end"])
+        if downloaded < end + _SETTLE:
+            return True, ""
+        last = pd.Timestamp(session["last_trade"]) if session.get("last_trade") else None
+        if last is None:
+            return False, ""
+        if last > end + _SETTLE:
+            # Trades after the calendar's close: the calendar is wrong for
+            # this session. Still arriving means unknown; gone quiet means over.
+            if downloaded - last < _FEED_QUIET:
+                return None, "calendar_contradicted"
+            return False, ""
+        if last >= end:
+            return False, ""  # the closing print is in hand
+        # Last trade before the close: either a quiet stock or a delayed feed.
+        return bool(downloaded < end + _SETTLE + _MAX_FEED_DELAY), ""
 
     # No calendar. A bar dated more than 36 hours before the download has
     # ended in every time zone.
     if bar_day < (downloaded - pd.Timedelta(hours=36)).date():
-        return False
+        return False, ""
     if _US_STYLE_SYMBOL.fullmatch(ticker):
         ny = downloaded.tz_convert(_NY_TZ)
-        if bar_day != ny.date():
-            return False
+        if bar_day < ny.date():
+            return False, ""
+        if bar_day > ny.date():
+            return None, "no_calendar"  # only a wrong clock gets here
         settle_minutes = int(_SETTLE.total_seconds() // 60)
-        return ny.hour * 60 + ny.minute < _US_REGULAR_CLOSE_MINUTE + settle_minutes
-    return None
+        return ny.hour * 60 + ny.minute < _US_REGULAR_CLOSE_MINUTE + settle_minutes, ""
+    return None, "no_calendar"
 
 
 def _last_trade_day(prices: LatestPrices) -> object | None:
@@ -235,12 +314,18 @@ def _last_trade_day(prices: LatestPrices) -> object | None:
 
 
 def _age_phrase(seconds: float) -> str:
-    """A duration in the largest sensible unit, for notes."""
+    """How long ago, in the largest sensible unit, for notes."""
+    if seconds < 0:
+        return "at an unknown time (its saved timestamp is in the future)"
+
+    def plural(count: int, unit: str) -> str:
+        return f"{count} {unit}{'' if count == 1 else 's'} ago"
+
     if seconds < 5400:
-        return f"{max(int(seconds // 60), 1)} minutes"
+        return plural(max(int(seconds // 60), 1), "minute")
     if seconds < 172800:
-        return f"{seconds / 3600:.0f} hours"
-    return f"{seconds / 86400:.0f} days"
+        return plural(round(seconds / 3600), "hour")
+    return plural(round(seconds / 86400), "day")
 
 
 # ---------------------------------------------------------------------------
@@ -285,8 +370,13 @@ class DeskSnapshot:
     last_close: float
     history_rows: int
     live: bool                   # fundamentals and/or news were injected
+    # Fundamentals and news were asked for (newest bar, not masked, not
+    # switched off). ``live_attempted and not live`` is the rate-limit signature.
+    live_attempted: bool = False
     fetched_at: str = ""         # when the prices left Yahoo, UTC "YYYY-MM-DDTHH:MMZ"
     company: str | None = None   # Yahoo's name for the symbol, when known
+    instrument_type: str | None = None   # Yahoo's label: EQUITY, ETF, CRYPTOCURRENCY ...
+    currency: str | None = None  # what prices and fundamentals are quoted in
     # True: the last bar is an unfinished session. False: it is a close.
     # None: it could not be established (no exchange calendar).
     partial_session: bool | None = False
@@ -372,6 +462,7 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
     fundamentals: str | None = None
     fundamentals_missing: list[str] = []
     news: list[str] | None = None
+    live_attempted = False
     if historical and not anonymize:
         notes.append(
             "This is a past date shown with its real ticker, dates and prices: a "
@@ -395,6 +486,7 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
             missing_ratio_fields,
         )
 
+        live_attempted = True
         raw, items = _fetch_live_inputs(ticker)
         if not raw.get("available"):
             notes.append(
@@ -440,6 +532,8 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
     partial: bool | None = False
     stale = False
     behind = False
+    session = prices.session or {}
+    currency = session.get("currency")
     if not historical:
         session_notes: list[str] = []
         behind = prices.refresh_failed
@@ -458,9 +552,9 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
             session_notes.append(
                 "Prices could not be refreshed (Yahoo returned nothing, which "
                 "usually means it is rate-limiting). These prices were downloaded "
-                f"{_age_phrase(age)} ago and newer bars may be missing."
+                f"{_age_phrase(age)} and newer bars may be missing."
             )
-        partial = _last_bar_is_partial(ticker, as_of, prices)
+        partial, reason = _last_bar_is_partial(ticker, as_of, prices)
         if partial:
             session_notes.append(
                 f"The last bar ({as_of:%Y-%m-%d}) is an unfinished trading "
@@ -468,21 +562,36 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
                 "part-day count that must not be compared with full days, and "
                 "every indicator value will change by the close."
             )
+        elif partial is None and reason == "calendar_contradicted":
+            session_notes.append(
+                f"Yahoo's calendar says the session of the last bar ({as_of:%Y-%m-%d}) "
+                "has ended, but it was still reporting trades after that time. "
+                "The session may still be open: treat the close and volume as "
+                "provisional."
+            )
         elif partial is None:
             session_notes.append(
                 f"It could not be confirmed that the last bar ({as_of:%Y-%m-%d}) "
                 "is a finished session, because the exchange calendar was "
                 "unavailable. Treat its close and volume as provisional."
             )
-        local_tz = prices.session["exchange_tz"] if prices.session else _NY_TZ
+        local_tz = session.get("exchange_tz") or _NY_TZ
         age_days = (now.tz_convert(local_tz).date() - as_of.date()).days
         stale = age_days > _STALE_AFTER_DAYS
         if stale:
             session_notes.append(
                 f"The newest available bar is {age_days} days old ({as_of:%Y-%m-%d}). "
-                "The symbol may be halted, delisted or illiquid; treat the "
-                "snapshot as stale."
+                "No exchange holiday is that long: the symbol is probably halted, "
+                "delisted or illiquid. Treat the snapshot as stale."
             )
+        elif age_days > _OLD_BAR_NOTE_DAYS:
+            session_notes.append(
+                f"The newest available bar is {age_days} days old ({as_of:%Y-%m-%d}). "
+                "That is normal during a long exchange holiday; otherwise the "
+                "symbol may be halted."
+            )
+        if currency and currency != "USD" and not anonymize:
+            session_notes.append(f"Prices and fundamentals are quoted in {currency}.")
         notes += session_notes
         data_notes = session_notes + data_notes
 
@@ -492,15 +601,17 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
     )
     if data_notes:
         snapshot = replace(snapshot, data_notes=data_notes)
-    company = prices.session.get("name") if prices.session else None
     return DeskSnapshot(
         snapshot=snapshot,
         as_of=as_of.strftime("%Y-%m-%d"),
         last_close=float(history["close"].iloc[-1]),
         history_rows=len(history),
         live=bool(fundamentals or news),
+        live_attempted=live_attempted,
         fetched_at=prices.downloaded_at.strftime("%Y-%m-%dT%H:%MZ"),
-        company=None if anonymize else company,
+        company=None if anonymize else session.get("name"),
+        instrument_type=session.get("instrument_type") or None,
+        currency=None if anonymize else currency,
         partial_session=partial,
         stale=stale,
         prices_behind=behind,
@@ -517,13 +628,15 @@ def snapshot_to_dict(desk: DeskSnapshot) -> dict:
     """JSON-serializable view of a desk snapshot.
 
     ``context`` is the exact text block the agents receive. When the snapshot
-    is anonymized, ``last_close`` and ``company`` are withheld so nothing that
-    identifies the stock sits next to the masked block.
+    is anonymized, ``last_close``, ``company`` and ``currency`` are withheld
+    so nothing that identifies the stock sits next to the masked block.
     """
     snap = desk.snapshot
     return {
         "ticker": snap.ticker,
         "company": desk.company,
+        "instrument_type": desk.instrument_type,
+        "currency": desk.currency,
         "as_of": desk.as_of,
         "fetched_at": desk.fetched_at,
         "last_close": None if snap.anonymize else round(desk.last_close, 4),
@@ -568,6 +681,8 @@ def decision_to_dict(log: AgentDayLog, desk: DeskSnapshot,
     return {
         "ticker": log.ticker,
         "company": desk.company,
+        "instrument_type": desk.instrument_type,
+        "currency": desk.currency,
         "as_of": desk.as_of,
         "fetched_at": desk.fetched_at,
         "last_close": None if desk.snapshot.anonymize else round(desk.last_close, 4),

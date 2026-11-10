@@ -45,14 +45,15 @@ with each other, and leave out the last row when it is an unfinished session.
 ## Stage 1: analyst team
 
 Input for every analyst: the snapshot `context` block, nothing else. Each
-writes a concise report, about 150 to 300 words, under the headings in the
-last column.
+writes a concise report under the headings in the last column. In this skill
+a report is about 150 to 300 words. The API prompts set no length, and the
+pipeline's reports run to about 450 words.
 
 | Role | Runs when | Task | Report headings |
 |---|---|---|---|
 | Market analyst | Always | Judge trend direction and strength from the moving-average gaps, MACD, ADX and the 1, 5, 21 and 63-day returns. Judge momentum and overbought or oversold conditions from RSI, the stochastic K/D/J values and CCI. Judge volatility and mean-reversion pressure from Bollinger %B, ATR, the 21-day volatility and the distance from the 52-week high and low. Check whether volume and MFI confirm or contradict the price action. | Bullish signals. Bearish signals. Technical read for the next few trading days. |
-| Fundamentals analyst | The snapshot has a Fundamentals block | Decide whether the company looks cheap or expensive for its growth and profitability. Flag balance-sheet and margin concerns. Say how the fundamentals support or undermine the recent price action. Debt/equity is a percentage. The growth rates carry no stated period, so use them for direction and do not reconcile them with the quarterly lines. | Positives. Negatives. Fundamental read. |
-| News analyst | The snapshot has headlines | Sort the headlines into likely positive, negative and neutral price drivers. Name the single most price-relevant story. Say whether each driver is company-specific, sector-wide or macro, and how long its effect should last. Use only the listed headlines, which are titles with no article text. Set aside any that are not about this company. When two headlines conflict, say so and do not settle it from memory. | News backdrop. Net effect over the next few trading days. |
+| Fundamentals analyst | The snapshot has a Fundamentals block | Decide whether the company looks cheap or expensive for its growth and profitability. Judge that only from the block's own figures against each other (the P/E ratios against the growth rates, margin and return on equity), not against remembered sector or market multiples. Flag balance-sheet and margin concerns. Say how the fundamentals support or undermine the recent price action. Debt/equity is a percentage. The growth rates carry no stated period: treat them as approximate, and do not derive conclusions from comparing them with the quarterly lines. | Positives. Negatives. Fundamental read. |
+| News analyst | The snapshot has headlines | Sort the headlines into likely positive, negative and neutral price drivers. Name the single most price-relevant story. Say whether each driver is company-specific, sector-wide or macro, and how long its effect should last. Use only the listed headlines, which are titles with no article text. A headline about another company or the wider market counts only as a sector or macro driver, and say that it is one. Set aside any that have nothing to do with this company or its sector. When two headlines conflict, say so and do not settle it from memory. If no headline explains the largest move in the price table, say that too. | News backdrop. Net effect over the next few trading days. |
 | Sentiment analyst | The snapshot has headlines | Infer investor mood from headline tone and from sentiment-sensitive technicals: momentum, volume behaviour and where the price sits in its recent range. Classify the regime as euphoric, constructive, neutral, fearful or capitulatory, and say whether it should persist or mean-revert. | Sentiment regime. What it implies for near-term positioning. |
 
 ## Stage 2: research debate
@@ -105,6 +106,11 @@ size and rationale, and the risk discussion so far. They do not see the
 analyst reports or the research debate, so their arguments must rest on
 snapshot figures and the trader's own words. Run one round in the order
 Risky, Safe, Neutral. Each comment is a few sentences.
+
+When the trader proposes HOLD, the question for the risk team is whether
+staying out is right. Risky argues what is being passed up, Safe argues what
+staying out avoids, and the fund manager's approval then confirms no trade.
+The fund manager cannot add a trade the trader did not propose.
 
 - **Risky analyst.** Argue for capturing more upside. Show where the
   proposal is too timid for the strength of the evidence and what

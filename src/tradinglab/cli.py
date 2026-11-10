@@ -27,6 +27,7 @@ matplotlib.use("Agg")  # must be set before pyplot is imported (headless-safe)
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 
+from tradinglab import __version__  # noqa: E402
 from tradinglab.backtest.baselines import STRATEGIES  # noqa: E402
 from tradinglab.backtest.engine import backtest_portfolio, backtest_signals  # noqa: E402
 from tradinglab.backtest.metrics import metrics_table  # noqa: E402
@@ -459,6 +460,30 @@ def cmd_agents(args: argparse.Namespace) -> None:
     print(f"transcripts: {out_dir}")
 
 
+def _exit_unwritable(directory: Path, exc: OSError) -> None:
+    print(
+        f"error: cannot write to {directory} ({exc.strerror or exc}). "
+        "Set TRADINGLAB_HOME to a writable directory and rerun.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _require_writable(directory: Path) -> None:
+    """Exit 1 with one clear line unless a file can really be created in ``directory``.
+
+    ``mkdir(exist_ok=True)`` succeeds on a directory that exists but is
+    read-only, so the only honest test is to write something.
+    """
+    probe = directory / ".write-test"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        _exit_unwritable(directory, exc)
+
+
 def _build_desk_snapshot_or_exit(args: argparse.Namespace):
     """Shared snapshot construction for ``snapshot`` and ``desk`` (exit 1 on bad input)."""
     from tradinglab.agents.desk import build_desk_snapshot
@@ -492,8 +517,9 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
     print(payload["context"])
     print("\n--- Snapshot metadata ---")
     ticker_line = f"ticker: {payload['ticker']}"
-    if payload["company"]:
-        ticker_line += f" ({payload['company']})"
+    about = [payload[key] for key in ("company", "instrument_type", "currency") if payload[key]]
+    if about:
+        ticker_line += f" ({', '.join(about)})"
     print(ticker_line)
     print(
         f"as of: {payload['as_of']} ({price_phrase(desk)}, "
@@ -521,15 +547,15 @@ def cmd_desk(args: argparse.Namespace) -> None:
 
     desk = _build_desk_snapshot_or_exit(args)
 
-    # Refuse to spend API credit on data that is known to be bad. Live inputs
-    # were "wanted" when nothing on the command line switched them off.
-    wanted_live = not (args.no_live or args.anonymize or args.date)
+    # Refuse to spend API credit on data that is known to be bad. Whether live
+    # inputs were wanted is what the snapshot builder actually did, not a guess
+    # from the flags: --date <the newest bar> still asks Yahoo for them.
     problems = []
     if desk.stale:
         problems.append("the newest bar is stale")
     if desk.prices_behind:
         problems.append("the prices are behind the market")
-    if wanted_live and not desk.live:
+    if desk.live_attempted and not desk.live:
         problems.append("Yahoo returned no fundamentals and no headlines")
     if problems and not args.allow_degraded:
         print(f"error: not running the desk: {'; '.join(problems)}.", file=sys.stderr)
@@ -541,6 +567,12 @@ def cmd_desk(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # The transcript is the product of a paid run. Prove it can be saved
+    # before paying for it.
+    out_dir = RESULTS_DIR / "desk"
+    for directory in (out_dir, LLM_CACHE_DIR):
+        _require_writable(directory)
 
     agent_cfg = AgentConfig(debate_rounds=args.debate_rounds)
     print(
@@ -561,10 +593,8 @@ def cmd_desk(args: argparse.Namespace) -> None:
     cost = float(usage_table.loc["TOTAL", "cost_usd"]) if not usage_table.empty else 0.0
     payload = decision_to_dict(log, desk, usage=client.usage, cost_usd=cost)
 
-    # Kept apart from results/transcripts/, which holds backtest decision days
-    # that the dashboard replays into equity curves.
-    out_dir = RESULTS_DIR / "desk"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # results/desk/ is kept apart from results/transcripts/, which holds
+    # backtest decision days that the dashboard replays into equity curves.
     stem = f"{desk.snapshot.ticker}_{desk.as_of}"
     md_path = out_dir / f"{stem}.md"
     json_path = out_dir / f"{stem}.json"
@@ -720,6 +750,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="tradinglab",
         description="TradingAgents research lab: baselines, ML alpha, LLM agents.",
     )
+    parser.add_argument("--version", action="version", version=f"tradinglab {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
     data_defaults = DataConfig()
     ml_defaults = MLConfig()
@@ -843,12 +874,7 @@ def main(argv: list[str] | None = None) -> None:
         for directory in (RESULTS_DIR, DATA_CACHE_DIR):
             directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        print(
-            f"error: cannot write to {PROJECT_ROOT} ({exc.strerror or exc}). "
-            "Set TRADINGLAB_HOME to a writable directory and rerun.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        _exit_unwritable(PROJECT_ROOT, exc)
     args.func(args)
 
 

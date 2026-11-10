@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import sys
 import numpy as np
 import pandas as pd
 import pytest
+import yfinance as yf
 
 from tradinglab import cli
 from tradinglab import config as config_mod
@@ -41,6 +43,7 @@ from tradinglab.agents.state import (
 )
 from tradinglab.data import fundamentals as fundamentals_mod
 from tradinglab.data import news as news_mod
+from tradinglab.data import prices as prices_mod
 
 NY = "America/New_York"
 LAST_BAR = "2026-03-13"  # a Friday; New York is on daylight time (UTC-4)
@@ -58,6 +61,18 @@ ONE_HEADLINE = [{"title": "ABC beats estimates", "publisher": "Wire", "date": "2
 def no_retry_wait(monkeypatch):
     """The retry pause is real time; tests must not sleep through it."""
     monkeypatch.setattr(desk_mod, "_RETRY_WAIT_S", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def no_yahoo(monkeypatch):
+    """This module promises no network. The fetchers swallow ordinary
+    exceptions, so a forgotten fake would silently hit Yahoo and still pass:
+    fail the test outright instead (pytest.fail is not an Exception)."""
+    def blocked(*_a, **_k):
+        pytest.fail("a test reached Yahoo without faking it")
+
+    monkeypatch.setattr(yf, "Ticker", blocked)
+    monkeypatch.setattr(yf, "download", blocked)
 
 
 def _synthetic_df(n: int = 320, seed: int = 3, end: str = LAST_BAR) -> pd.DataFrame:
@@ -86,9 +101,10 @@ MIDDAY = _ny("11:30")
 
 
 def _session(tz: str = NY, end_utc: str = f"{LAST_BAR}T20:00:00+00:00",
-             kind: str = "EQUITY", name: str = "ABC Corp", last_trade: str | None = None) -> dict:
-    return {"exchange_tz": tz, "instrument_type": kind, "regular_end": end_utc,
-            "last_trade": last_trade, "name": name}
+             kind: str = "EQUITY", name: str = "ABC Corp", last_trade: str | None = None,
+             currency: str | None = None) -> dict:
+    return {"exchange_tz": tz, "instrument_type": kind, "currency": currency,
+            "regular_end": end_utc, "last_trade": last_trade, "name": name}
 
 
 def _prices(df: pd.DataFrame, downloaded: pd.Timestamp, session: dict | None = None,
@@ -584,15 +600,32 @@ def test_unknown_session_is_reported_as_unknown_not_as_a_close():
     assert later.partial_session is False and later.notes == []
 
 
-@pytest.mark.parametrize("days,stale", [(2, False), (5, False), (6, True), (14, True)])
-def test_stale_threshold(days, stale):
+@pytest.mark.parametrize("days,stale,noted", [
+    (2, False, False), (5, False, False), (6, False, True), (12, False, True),
+    (13, True, True), (30, True, True),
+])
+def test_old_bar_is_noted_then_called_stale(days, stale, noted):
+    """Up to twelve days can be a holiday closure (Lunar New Year), so the age
+    is only noted. Beyond that nothing innocent explains it: stale, and the
+    paid desk refuses."""
     df = _synthetic_df()
     now = _ny("12:00") + pd.Timedelta(days=days)
     desk = build_desk_snapshot("ABC", live=False, df=df, now=now)
-    assert desk.stale is stale
-    assert any(f"{days} days old" in n for n in desk.notes) is stale
-    assert (f"{days} days old" in desk.snapshot.context_block()) is stale
-    assert snapshot_to_dict(desk)["stale"] is stale
+    assert desk.stale is stale and snapshot_to_dict(desk)["stale"] is stale
+    assert any(f"{days} days old" in n for n in desk.notes) is noted
+    assert (f"{days} days old" in desk.snapshot.context_block()) is noted
+    assert any("Treat the snapshot as stale" in n for n in desk.notes) is stale
+    assert any("long exchange holiday" in n for n in desk.notes) is (noted and not stale)
+
+
+def test_stale_age_is_counted_on_the_exchange_calendar():
+    df = _synthetic_df()
+    late = _ny("21:00", day="2026-03-25")  # 12 days in New York, already the 26th in UTC
+    assert build_desk_snapshot("ABC", live=False, df=df, now=late).stale is False
+    tokyo = _session(tz="Asia/Tokyo", end_utc="2026-03-26T06:30:00+00:00")
+    early = pd.Timestamp("2026-03-26 08:00", tz="Asia/Tokyo")  # 13 days in Tokyo, the 25th in UTC
+    assert build_desk_snapshot("7203.T", live=False, now=early,
+                               prices=_prices(df, early, tokyo)).stale is True
 
 
 def test_failed_refresh_is_said_out_loud():
@@ -650,11 +683,12 @@ def test_snapshot_payload_reports_every_key():
                                prices=_prices(df, AFTER_CLOSE, _session()))
     payload = snapshot_to_dict(desk)
     assert set(payload) == {
-        "ticker", "company", "as_of", "fetched_at", "last_close", "partial_session", "stale",
-        "prices_behind", "history_rows", "anonymized", "has_fundamentals",
-        "fundamentals_missing", "news_headlines", "notes", "context", "disclaimer",
+        "ticker", "company", "instrument_type", "currency", "as_of", "fetched_at",
+        "last_close", "partial_session", "stale", "prices_behind", "history_rows",
+        "anonymized", "has_fundamentals", "fundamentals_missing", "news_headlines", "notes",
+        "context", "disclaimer",
     }
-    assert payload["company"] == "ABC Corp"
+    assert payload["company"] == "ABC Corp" and payload["instrument_type"] == "EQUITY"
     assert payload["disclaimer"] == desk_mod.DISCLAIMER
     assert "not investment advice" in payload["disclaimer"]
     assert "has not been backtested" in payload["disclaimer"]
@@ -765,9 +799,11 @@ def test_session_info_parses_yahoo_metadata(monkeypatch):
 
     monkeypatch.setattr(yf, "Ticker", FakeTicker)
     info = desk_mod._fetch_session_info("7203.T")
-    assert info == {"exchange_tz": "Asia/Tokyo", "instrument_type": "EQUITY",
+    assert info == {"exchange_tz": "Asia/Tokyo", "instrument_type": "EQUITY", "currency": None,
                     "regular_end": "2026-03-13T06:30:00+00:00", "last_trade": None,
                     "name": "Toyota Motor Corporation"}
+    meta["currency"] = "JPY"
+    assert desk_mod._fetch_session_info("7203.T")["currency"] == "JPY"
     meta["regularMarketTime"] = 1773383400
     assert desk_mod._fetch_session_info("7203.T")["last_trade"] == "2026-03-13T06:30:00+00:00"
     json.dumps(info)
@@ -850,6 +886,9 @@ def offline_cli(monkeypatch, tmp_path):
         return LatestPrices(df=df, downloaded_at=desk_mod._utc(now), session=finished)
 
     monkeypatch.setattr(desk_mod, "fetch_latest_prices", fake_latest)
+    # Nothing in the CLI tests may fetch live inputs unless the test supplies
+    # them with _live() afterwards, which replaces these guards.
+    _no_live(monkeypatch, "the CLI fetched live data that this test did not provide")
     monkeypatch.setattr(cli, "RESULTS_DIR", tmp_path / "results")
     monkeypatch.setattr(cli, "DATA_CACHE_DIR", tmp_path / "data")
     monkeypatch.setattr(cli, "LLM_CACHE_DIR", tmp_path / "llm")
@@ -897,7 +936,7 @@ def test_cli_snapshot_text_prints_block_then_metadata_and_notes(offline_cli, cap
     cli.main(["snapshot", "--ticker", "ABC", "--no-live", "--date", past])
     out = capsys.readouterr().out
     assert out.index("=== Market snapshot: ABC") < out.index("--- Snapshot metadata ---")
-    assert f"as of: {past}" in out and "ticker: ABC (ABC Corp)" in out
+    assert f"as of: {past}" in out and "ticker: ABC (ABC Corp, EQUITY)" in out
     assert "note: This is a past date" in out
     assert out.rstrip().endswith(desk_mod.DISCLAIMER)
 
@@ -1001,7 +1040,7 @@ def test_cli_desk_without_credentials_exits_cleanly_and_saves_nothing(offline_cl
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "error: No Anthropic API credentials found." in captured.err and captured.out == ""
-    assert not (tmp_path / "results" / "desk").exists()
+    assert not list((tmp_path / "results" / "desk").glob("*"))
 
 
 def _desk_must_not_run(monkeypatch):
@@ -1019,13 +1058,14 @@ def test_cli_desk_refuses_to_spend_on_stale_data(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli, "RESULTS_DIR", tmp_path / "results")
     monkeypatch.setattr(cli, "DATA_CACHE_DIR", tmp_path / "data")
     monkeypatch.setattr(cli, "LLM_CACHE_DIR", tmp_path / "llm")
+    _no_live(monkeypatch, "--no-live must not fetch fundamentals or news")
     _desk_must_not_run(monkeypatch)
     with pytest.raises(SystemExit) as exc:
         cli.main(["desk", "--ticker", "ABC", "--no-live"])
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "not running the desk: the newest bar is stale" in err
-    assert "days old" in err and "--allow-degraded" in err
+    assert "days old" in err and "--allow-degraded" in err and "Nothing was spent" in err
 
     ran: list = []
     monkeypatch.setattr(TradingAgentsPipeline, "decide",
@@ -1057,3 +1097,488 @@ def test_cli_desk_refuses_when_prices_could_not_be_refreshed(offline_cli, monkey
         cli.main(["desk", "--ticker", "ABC", "--no-live"])
     assert exc.value.code == 1
     assert "the prices are behind the market" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# second review round: session state
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bar_end,now", [
+    ("2026-03-12", _ny("08:00")),                    # Friday pre-market, Thursday's bar
+    ("2026-03-13", _ny("08:00", day="2026-03-14")),  # Saturday morning, Friday's bar
+])
+def test_earlier_days_bar_is_final_while_todays_clock_is_before_the_close(bar_end, now):
+    """Run before the open, the newest bar is the previous session's close.
+    Today's session clock (still hours from its end) says nothing about it."""
+    df = _synthetic_df(end=bar_end)
+    yahoo = _session(end_utc=f"{now:%Y-%m-%d}T20:00:00+00:00",
+                     last_trade=f"{bar_end}T20:00:00+00:00")
+    with_calendar = build_desk_snapshot("ABC", live=False, now=now,
+                                        prices=_prices(df, now, yahoo))
+    without_calendar = build_desk_snapshot("ABC", live=False, df=df, now=now)
+    for desk in (with_calendar, without_calendar):
+        assert desk.as_of == bar_end
+        assert desk.partial_session is False and desk.prices_behind is False
+        assert desk.notes == [] and desk.snapshot.data_notes is None
+        assert desk_mod.price_phrase(desk).startswith("close ")
+
+
+@pytest.mark.parametrize("clock,partial", [("15:59", True), ("16:14", True), ("16:15", False)])
+def test_close_boundary_with_a_calendar(clock, partial):
+    """The closing print needs the same 15 minutes to settle whether or not
+    Yahoo's calendar is available."""
+    now = _ny(clock)
+    desk = build_desk_snapshot("ABC", live=False, now=now,
+                               prices=_prices(_synthetic_df(), now, _session()))
+    assert desk.partial_session is partial
+
+
+def test_exchange_local_day_decides_for_a_market_ahead_of_utc():
+    df = _synthetic_df()
+    sydney = _session(tz="Australia/Sydney", end_utc="2026-03-13T05:00:00+00:00", name="BHP")
+    just_open = pd.Timestamp("2026-03-13 10:30", tz="Australia/Sydney")  # 23:30 UTC on the 12th
+    desk = build_desk_snapshot("BHP.AX", live=False, now=just_open,
+                               prices=_prices(df, just_open, sydney))
+    assert desk.partial_session is True
+
+
+def _calendar_case(last_trade: str | None, downloaded: str) -> tuple[bool | None, list[str]]:
+    """Calendar says 20:00 UTC (16:00 New York). Vary the last trade and the clock."""
+    now = pd.Timestamp(f"{LAST_BAR} {downloaded}", tz="UTC")
+    session = _session(last_trade=f"{LAST_BAR}T{last_trade}+00:00" if last_trade else None)
+    desk = build_desk_snapshot("ABC", live=False, now=now,
+                               prices=_prices(_synthetic_df(), now, session))
+    return desk.partial_session, desk.notes
+
+
+def test_trades_after_the_calendars_close_mean_the_calendar_is_wrong():
+    """Seen live on a Mexican listing: Yahoo's session end was an hour early
+    and trades were still printing. The bar must not be called a close."""
+    state, notes = _calendar_case(last_trade="20:55:12", downloaded="21:15:12")
+    assert state is None
+    assert any("still reporting trades after that time" in n for n in notes)
+    assert not any("calendar was unavailable" in n for n in notes)
+    # Once the feed has been quiet for 45 minutes the session really is over.
+    state, notes = _calendar_case(last_trade="20:55:12", downloaded="21:41:00")
+    assert state is False and notes == []
+    state, _ = _calendar_case(last_trade="20:55:12", downloaded="21:39:00")
+    assert state is None
+
+
+def test_a_delayed_feed_is_not_mistaken_for_a_finished_session():
+    """Yahoo runs 10 to 20 minutes behind on many venues. Sixteen minutes
+    after the close, a last trade stamped before it may just be the delay."""
+    assert _calendar_case(last_trade="19:56:00", downloaded="20:16:00")[0] is True
+    assert _calendar_case(last_trade="19:56:00", downloaded="20:44:00")[0] is True
+    # Forty-five minutes on with nothing newer: a quiet stock, and it is over.
+    assert _calendar_case(last_trade="19:56:00", downloaded="20:45:00")[0] is False
+    # The closing print itself in hand settles it at once.
+    assert _calendar_case(last_trade="20:00:02", downloaded="20:16:00")[0] is False
+    assert _calendar_case(last_trade="20:14:59", downloaded="20:16:00")[0] is False
+    # No last-trade time to cross-check with: the calendar alone decides.
+    assert _calendar_case(last_trade=None, downloaded="20:16:00")[0] is False
+
+
+def test_a_bar_dated_after_the_download_is_not_a_close():
+    """A run that starts seconds before the exchange's midnight receives the
+    next day's just-opened bar."""
+    df = _synthetic_df()
+    just_before = pd.Timestamp("2026-03-12 23:59:57", tz="UTC")
+    crypto = _session(tz="UTC", kind="CRYPTOCURRENCY", end_utc="2026-03-12T23:59:00+00:00")
+    desk = build_desk_snapshot("BTC-USD", live=False, now=just_before,
+                               prices=_prices(df, just_before, crypto))
+    assert desk.partial_session is True
+    assert any("unfinished trading session" in n for n in desk.notes)
+    future = _session(kind="FUTURE", end_utc="2026-03-12T21:00:00+00:00")
+    late = _ny("23:59", day="2026-03-12")
+    assert build_desk_snapshot("ES=F", live=False, now=late,
+                               prices=_prices(df, late, future)).partial_session is True
+    # US-style symbol, no calendar: only a wrong clock gets here, so "unknown".
+    slow_clock = build_desk_snapshot("ABC", live=False, df=df, now=_ny("23:50", day="2026-03-12"))
+    assert slow_clock.partial_session is None
+
+
+def test_crypto_bar_is_open_whatever_regular_end_says():
+    """The instrument type alone keeps today's crypto bar open. Yahoo currently
+    reports 23:59 UTC as the regular end, which would do the same job; this
+    uses an earlier end so the rule does not depend on that."""
+    df = _synthetic_df()
+    late = pd.Timestamp(f"{LAST_BAR} 23:50", tz="UTC")
+    ended = f"{LAST_BAR}T12:00:00+00:00"
+    crypto = _session(tz="UTC", kind="CRYPTOCURRENCY", end_utc=ended)
+    assert build_desk_snapshot("BTC-USD", live=False, now=late,
+                               prices=_prices(df, late, crypto)).partial_session is True
+    equity = _session(tz="UTC", kind="EQUITY", end_utc=ended)
+    assert build_desk_snapshot("BTC-USD", live=False, now=late,
+                               prices=_prices(df, late, equity)).partial_session is False
+
+
+@pytest.mark.parametrize("ticker", ["7203.T", "SAP.DE", "BTC-USD", "^GSPC", "EURUSD=X", "RY.TO"])
+def test_only_plain_us_symbols_are_judged_on_the_new_york_clock(ticker):
+    desk = build_desk_snapshot(ticker, live=False, df=_synthetic_df(), now=_ny("21:00"))
+    assert desk.partial_session is None
+    assert any("could not be confirmed" in note for note in desk.notes)
+
+
+def test_class_share_symbols_are_us_style():
+    desk = build_desk_snapshot("brk-b", live=False, df=_synthetic_df(), now=_ny("21:00"))
+    assert desk.partial_session is False and desk.notes == []
+
+
+def test_foreign_currency_is_stated_to_caller_and_agents():
+    df = _synthetic_df()
+    after = pd.Timestamp(f"{LAST_BAR} 16:00", tz="Asia/Tokyo")
+    tokyo = _session(tz="Asia/Tokyo", end_utc=f"{LAST_BAR}T06:30:00+00:00", currency="JPY")
+    desk = build_desk_snapshot("7203.T", live=False, now=after, prices=_prices(df, after, tokyo))
+    assert desk.currency == "JPY" and snapshot_to_dict(desk)["currency"] == "JPY"
+    assert desk.notes == ["Prices and fundamentals are quoted in JPY."]
+    assert "quoted in JPY" in desk.snapshot.context_block()
+    dollars = build_desk_snapshot("ABC", live=False, now=AFTER_CLOSE,
+                                  prices=_prices(df, AFTER_CLOSE, _session(currency="USD")))
+    assert dollars.notes == [] and dollars.currency == "USD"
+    masked = build_desk_snapshot("7203.T", live=False, anonymize=True, now=after,
+                                 prices=_prices(df, after, tokyo))
+    assert masked.currency is None and "JPY" not in masked.snapshot.context_block()
+
+
+# ---------------------------------------------------------------------------
+# second review round: dates
+# ---------------------------------------------------------------------------
+
+def test_tomorrow_is_accepted_but_the_day_after_is_the_future():
+    """Sydney and Auckland open while UTC is still on the previous day, so
+    the exchange's 'today' is one day ahead of the clock used here."""
+    df = _synthetic_df()
+    now = pd.Timestamp(f"{LAST_BAR} 23:00", tz="UTC")
+    desk = build_desk_snapshot("ABC", date="2026-03-14", live=False, df=df, now=now)
+    assert desk.as_of == LAST_BAR
+    assert any("no bar for the requested date 2026-03-14" in note for note in desk.notes)
+    with pytest.raises(ValueError, match="--date 2026-03-15 is in the future"):
+        build_desk_snapshot("ABC", date="2026-03-15", live=False, df=df, now=now)
+
+
+def test_exchange_ahead_of_utc_can_name_its_own_today():
+    df = _synthetic_df(end="2026-03-16")                 # Monday bar already printed in Sydney
+    now = pd.Timestamp("2026-03-15 23:30", tz="UTC")     # 10:30 Sydney on the 16th
+    desk = build_desk_snapshot("ABC", date="2026-03-16", live=False, df=df, now=now)
+    assert desk.as_of == "2026-03-16"
+    assert not any("no bar for the requested date" in note for note in desk.notes)
+
+
+def test_date_with_an_offset_or_a_time_keeps_its_calendar_day():
+    df = _synthetic_df()
+    offset = build_desk_snapshot("ABC", date="2026-02-13T00:30:00+09:00", live=False, df=df,
+                                 now=AFTER_CLOSE)
+    assert offset.as_of == "2026-02-13"
+    timed = build_desk_snapshot("ABC", date="2026-02-13 15:30", live=False, df=df,
+                                now=AFTER_CLOSE)
+    assert timed.as_of == "2026-02-13"
+    assert not any("no bar for the requested date" in note for note in timed.notes)
+
+
+def test_no_live_past_date_does_not_say_live_data_was_withheld():
+    desk = build_desk_snapshot("ABC", date="2026-02-13", live=False, df=_synthetic_df(),
+                               now=AFTER_CLOSE)
+    assert not any("NOT added" in note for note in desk.notes)
+    assert len(desk.notes) == 1  # the memorization warning only
+
+
+# ---------------------------------------------------------------------------
+# second review round: downloads
+# ---------------------------------------------------------------------------
+
+def test_a_download_missing_the_newest_session_is_not_reused(monkeypatch, tmp_path):
+    """The skill says: prices behind, wait a minute, fetch once more. Serving
+    the same defective download from the reuse window made that retry useless."""
+    answers = [_synthetic_df(end="2026-03-12"), _synthetic_df(end=LAST_BAR)]
+    downloads: list = []
+
+    def fake_fetch(ticker, start, end=None, cache_dir=None, force=False):
+        df = answers[min(len(downloads), 1)]
+        downloads.append(1)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(cache_dir / f"{ticker}_{start}_latest.parquet")
+        return {ticker: df}
+
+    monkeypatch.setattr(desk_mod, "fetch_prices", fake_fetch)
+    monkeypatch.setattr(desk_mod, "_fetch_session_info",
+                        lambda t: _session(last_trade=f"{LAST_BAR}T20:00:00+00:00"))
+    first = build_desk_snapshot("ABC", live=False, now=AFTER_CLOSE,
+                                prices=fetch_latest_prices("ABC", cache_dir=tmp_path,
+                                                           now=AFTER_CLOSE))
+    assert first.prices_behind is True and first.as_of == "2026-03-12"
+    minute_later = AFTER_CLOSE + pd.Timedelta(seconds=60)
+    second = build_desk_snapshot("ABC", live=False, now=minute_later,
+                                 prices=fetch_latest_prices("ABC", cache_dir=tmp_path,
+                                                            now=minute_later))
+    assert len(downloads) == 2
+    assert second.prices_behind is False and second.as_of == LAST_BAR
+    fetch_latest_prices("ABC", cache_dir=tmp_path, now=minute_later + pd.Timedelta(minutes=5))
+    assert len(downloads) == 2  # the healthy download is reused as usual
+
+
+def test_a_download_stamped_in_the_future_is_not_reused(yahoo, tmp_path):
+    """A sidecar written while the clock ran ahead must not pin the desk to
+    that download until the clock catches up."""
+    fetch_latest_prices("ABC", cache_dir=tmp_path, now=AFTER_CLOSE + pd.Timedelta(days=2))
+    got = fetch_latest_prices("ABC", cache_dir=tmp_path, now=AFTER_CLOSE)
+    assert yahoo["downloads"] == 2
+    assert got.downloaded_at == AFTER_CLOSE.tz_convert("UTC")
+
+
+def test_an_unknown_symbol_is_not_retried(yahoo, tmp_path):
+    def not_found(ticker, start, end=None, cache_dir=None, force=False):
+        yahoo["downloads"] += 1
+        raise prices_mod.PriceDataError("Yahoo returned no price data ...", "not_found")
+
+    desk_mod.fetch_prices = not_found  # restored by the yahoo fixture's monkeypatch
+    with pytest.raises(ValueError, match="no price data"):
+        fetch_latest_prices("ZZZQX", cache_dir=tmp_path, now=AFTER_CLOSE)
+    assert yahoo["downloads"] == 1 and yahoo["slept"] == []
+
+
+def test_sidecar_from_another_download_is_ignored(yahoo, tmp_path):
+    """A run interrupted between the two writes leaves new prices beside the
+    previous run's sidecar. Its download time and calendar describe a
+    different bar and must not be applied to this one."""
+    fetch_latest_prices("ABC", cache_dir=tmp_path, now=AFTER_CLOSE)
+    cache = tmp_path / "desk" / "ABC_2015-01-01_latest.parquet"
+    sidecar = tmp_path / "desk" / "ABC_2015-01-01_latest.meta.json"
+    assert json.loads(sidecar.read_text())["last_bar"] == LAST_BAR
+    _synthetic_df(end="2026-03-16").to_parquet(cache)  # newer prices, old sidecar
+    stamp = _ny("11:30", day="2026-03-16").timestamp()
+    os.utime(cache, (stamp, stamp))
+    yahoo["fail"] = 2
+    got = fetch_latest_prices("ABC", cache_dir=tmp_path, now=_ny("12:10", day="2026-03-16"))
+    assert got.refresh_failed is True and got.session is None
+    assert got.downloaded_at == _ny("11:30", day="2026-03-16").tz_convert("UTC")
+    desk = build_desk_snapshot("ABC", live=False, now=_ny("12:10", day="2026-03-16"), prices=got)
+    assert desk.partial_session is True  # an intraday bar, not Friday's close
+
+
+def test_interrupted_metadata_request_leaves_a_truthful_sidecar(yahoo, tmp_path, monkeypatch):
+    def interrupted(ticker):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(desk_mod, "_fetch_session_info", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        fetch_latest_prices("ABC", cache_dir=tmp_path, now=AFTER_CLOSE)
+    sidecar = json.loads((tmp_path / "desk" / "ABC_2015-01-01_latest.meta.json").read_text())
+    assert sidecar["session"] is None and sidecar["last_bar"] == LAST_BAR
+    assert pd.Timestamp(sidecar["downloaded_at"]) == AFTER_CLOSE.tz_convert("UTC")
+
+
+def test_price_policy_against_the_real_fetch_prices(tmp_path, monkeypatch):
+    downloads: list = []
+
+    def fake_download(ticker, start=None, end=None, **_kwargs):
+        downloads.append((ticker, start, end))
+        return _synthetic_df().rename(columns=str.title)
+
+    monkeypatch.setattr(prices_mod.yf, "download", fake_download)
+    monkeypatch.setattr(desk_mod, "_fetch_session_info", lambda t: _session())
+    first = fetch_latest_prices("ABC", cache_dir=tmp_path, now=AFTER_CLOSE)
+    assert downloads == [("ABC", config_mod.DataConfig().start, None)]  # open-ended request
+    again = fetch_latest_prices("ABC", cache_dir=tmp_path, now=AFTER_CLOSE + pd.Timedelta(minutes=5))
+    assert len(downloads) == 1 and again.downloaded_at == first.downloaded_at
+
+
+def test_unwritable_cache_does_not_lose_downloaded_prices(tmp_path, monkeypatch):
+    """The cache is a convenience. Prices Yahoo delivered must not turn into a
+    traceback because the data directory is read-only."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where a directory is needed")
+    monkeypatch.setattr(prices_mod.yf, "download",
+                        lambda *a, **k: _synthetic_df().rename(columns=str.title))
+    monkeypatch.setattr(desk_mod, "_fetch_session_info", lambda t: _session())
+    with pytest.warns(RuntimeWarning, match="not writable"):
+        got = fetch_latest_prices("ABC", cache_dir=blocker, now=AFTER_CLOSE)
+    assert len(got.df) == 320 and got.session == _session()
+    assert build_desk_snapshot("ABC", live=False, now=AFTER_CLOSE, prices=got).as_of == LAST_BAR
+
+
+@pytest.mark.parametrize("logged,reason,says", [
+    ("['ABC']: YFRateLimitError('Too Many Requests. Rate limited. Try after a while.')",
+     "rate_limited", "rate-limiting"),
+    ("HTTP Error 404: Quote not found for symbol: ZZZQX", "not_found", "does not know this symbol"),
+    ("$ZZZQX: possibly delisted; no timezone found", "not_found", "Check the symbol"),
+    ("", "unknown", "no reason was given"),
+])
+def test_empty_download_error_says_what_yahoo_said(monkeypatch, tmp_path, logged, reason, says):
+    """Yahoo answers a rate limit and an unknown symbol with the same empty
+    frame. The remedies are opposite, so the error has to tell them apart."""
+    def fake_download(*_a, **_k):
+        if logged:
+            logging.getLogger("yfinance").error(logged)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(prices_mod.yf, "download", fake_download)
+    with pytest.raises(prices_mod.PriceDataError) as exc:
+        prices_mod.fetch_prices("ABC", "2020-01-01", cache_dir=tmp_path, force=True)
+    assert exc.value.reason == reason
+    assert str(exc.value).startswith("Yahoo returned no price data for ticker 'ABC'")
+    assert says in str(exc.value)
+    assert not logging.getLogger("yfinance").handlers or all(
+        not isinstance(h, prices_mod._YahooLog) for h in logging.getLogger("yfinance").handlers)
+
+
+@pytest.mark.parametrize("seconds,phrase", [
+    (20, "1 minute ago"), (16 * 60, "16 minutes ago"), (89 * 60, "89 minutes ago"),
+    (3600 * 1.5, "2 hours ago"), (20 * 3600, "20 hours ago"), (47 * 3600, "47 hours ago"),
+    (48 * 3600, "2 days ago"), (9 * 86400, "9 days ago"),
+])
+def test_age_phrase_uses_the_right_unit(seconds, phrase):
+    assert desk_mod._age_phrase(seconds) == phrase
+
+
+@pytest.mark.parametrize("age,phrase", [
+    (pd.Timedelta(minutes=40), "downloaded 40 minutes ago"),
+    (pd.Timedelta(days=3), "downloaded 3 days ago"),
+    (pd.Timedelta(minutes=-30), "downloaded at an unknown time"),
+])
+def test_failed_refresh_note_states_the_real_age(age, phrase):
+    downloaded = _ny("17:00")
+    desk = build_desk_snapshot(
+        "ABC", live=False, now=downloaded + age,
+        prices=_prices(_synthetic_df(), downloaded, _session(), refresh_failed=True))
+    assert any("could not be refreshed" in n and phrase in n for n in desk.notes)
+
+
+# ---------------------------------------------------------------------------
+# second review round: payloads and CLI
+# ---------------------------------------------------------------------------
+
+def test_decision_payload_carries_the_session_flags():
+    df = _synthetic_df()
+    open_bar = build_desk_snapshot("ABC", live=False, df=df, now=MIDDAY)
+    assert decision_to_dict(_day_log(), open_bar)["partial_session"] is True
+    unknown = build_desk_snapshot("7203.T", live=False, df=df, now=_ny("21:00"))
+    assert decision_to_dict(_day_log("7203.T"), unknown)["partial_session"] is None
+    behind = build_desk_snapshot(
+        "ABC", live=False, now=AFTER_CLOSE + pd.Timedelta(hours=20),
+        prices=_prices(df, AFTER_CLOSE, _session(), refresh_failed=True))
+    payload = decision_to_dict(_day_log(), behind)
+    assert payload["prices_behind"] is True and payload["partial_session"] is False
+    masked = build_desk_snapshot("ABC", live=False, anonymize=True, df=df, now=AFTER_CLOSE)
+    hidden = decision_to_dict(_day_log(), masked)
+    assert hidden["anonymized"] is True and hidden["last_close"] is None
+
+
+def test_cli_version_flag(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+    assert exc.value.code == 0
+    from tradinglab import __version__
+    assert capsys.readouterr().out.strip() == f"tradinglab {__version__}"
+
+
+def test_cli_no_live_never_calls_yahoo(offline_cli, capsys):
+    cli.main(["snapshot", "--ticker", "ABC", "--no-live", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["has_fundamentals"] is False and payload["news_headlines"] == 0
+    assert payload["notes"] == []
+
+
+def test_cli_snapshot_anonymize_text_masks_the_price(offline_cli, capsys):
+    cli.main(["snapshot", "--ticker", "ABC", "--anonymize"])
+    out = capsys.readouterr().out
+    assert "(close masked, " in out and "ABC Corp" not in out
+
+
+def test_cli_desk_rejects_zero_debate_rounds(offline_cli, monkeypatch):
+    _desk_must_not_run(monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["desk", "--ticker", "ABC", "--no-live", "--debate-rounds", "0"])
+    assert exc.value.code == 2
+
+
+def test_cli_desk_gate_follows_what_the_snapshot_actually_asked_for(offline_cli, monkeypatch,
+                                                                    capsys):
+    """--date equal to the newest bar is still a live snapshot. The gate used
+    to read the flags, saw --date, and let an empty one through."""
+    _, as_of, df = offline_cli
+    _live(monkeypatch, fundamentals={"available": False, "error": "429"}, news=[])
+    _desk_must_not_run(monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["desk", "--ticker", "ABC", "--date", as_of])
+    assert exc.value.code == 1
+    assert "no fundamentals and no headlines" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("extra", [["--no-live"], ["--anonymize"], ["--date", "PAST"]])
+def test_cli_desk_gate_does_not_block_runs_that_never_wanted_live_data(offline_cli, monkeypatch,
+                                                                       capsys, extra):
+    _, _, df = offline_cli
+    extra = [df.index[-30].strftime("%Y-%m-%d") if x == "PAST" else x for x in extra]
+    ran: list = []
+    monkeypatch.setattr(TradingAgentsPipeline, "decide",
+                        lambda self, snapshot: ran.append(1) or _day_log(snapshot.ticker,
+                                                                         snapshot.date))
+    cli.main(["desk", "--ticker", "ABC", *extra])
+    assert ran == [1]
+
+
+def test_cli_desk_proves_it_can_save_before_it_spends(offline_cli, monkeypatch, capsys):
+    """results/ existing but unwritable would lose a paid run to a traceback
+    after the money was spent."""
+    tmp_path, _, _ = offline_cli
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where a directory is needed")
+    (tmp_path / "results").mkdir()
+    monkeypatch.setattr(cli, "LLM_CACHE_DIR", blocker / "llm")
+    _desk_must_not_run(monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["desk", "--ticker", "ABC", "--no-live"])
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "cannot write to" in err and "TRADINGLAB_HOME" in err
+
+
+def test_cli_desk_json_is_ascii_safe_and_keeps_utf8_on_disk(offline_cli, monkeypatch, capsys):
+    """Model text is full of dashes, arrows and quotes that cp1252 cannot
+    carry. stdout JSON must be pure ASCII; the saved file keeps the text."""
+    text = "Momentum \u2192 \u4e0a\u6607 \u2014 \u201caligned\u201d \U0001f680"
+
+    def decide(self, snapshot):
+        log = _day_log(snapshot.ticker, snapshot.date)
+        log.decision.rationale = text
+        return log
+
+    monkeypatch.setattr(TradingAgentsPipeline, "decide", decide)
+    cli.main(["desk", "--ticker", "ABC", "--no-live", "--json"])
+    out = capsys.readouterr().out
+    assert out.isascii()
+    payload = json.loads(out)
+    assert payload["trader"]["rationale"] == text
+    saved = payload["transcript_path"][:-3] + ".json"
+    with open(saved, encoding="utf-8") as fh:
+        raw = fh.read()
+    assert text in raw and json.loads(raw)["trader"]["rationale"] == text
+
+
+def test_cli_desk_text_output_survives_a_legacy_console(offline_cli, monkeypatch):
+    def decide(self, snapshot):
+        log = _day_log(snapshot.ticker, snapshot.date)
+        log.decision.rationale = "Momentum \u2192 up"
+        return log
+
+    monkeypatch.setattr(TradingAgentsPipeline, "decide", decide)
+    raw = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(raw, encoding="cp1252"))
+    cli.main(["desk", "--ticker", "ABC", "--no-live"])
+    sys.stdout.flush()
+    assert b"Momentum \\u2192 up" in raw.getvalue()
+
+
+def test_cli_desk_text_output_shows_the_spend(offline_cli, monkeypatch, capsys):
+    def decide(self, snapshot):
+        self.client._usage["claude-haiku-4-5"] = {
+            "calls": 3, "input_tokens": 1_000_000, "output_tokens": 0, "cache_hits": 1,
+        }
+        return _day_log(snapshot.ticker, snapshot.date)
+
+    monkeypatch.setattr(TradingAgentsPipeline, "decide", decide)
+    cli.main(["desk", "--ticker", "ABC", "--no-live"])
+    out = capsys.readouterr().out
+    assert "Token usage / cost (USD)" in out and "claude-haiku-4-5" in out
+    assert out.count("saved: ") == 2 and ".json" in out
