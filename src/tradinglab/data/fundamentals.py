@@ -23,6 +23,33 @@ _INFO_KEYS = {
 }
 
 
+# Human-readable labels for the ratio fields, in display order.
+RATIO_LABELS = {
+    "trailing_pe": "trailing P/E",
+    "forward_pe": "forward P/E",
+    "market_cap": "market cap",
+    "profit_margins": "profit margin",
+    "return_on_equity": "return on equity",
+    "debt_to_equity": "debt/equity",
+    "revenue_growth": "revenue growth",
+    "earnings_growth": "earnings growth",
+}
+
+
+def missing_ratio_fields(snapshot: dict) -> list[str]:
+    """Labels of the ratio fields Yahoo returned no usable number for.
+
+    A snapshot can be ``available`` and still carry nothing: when Yahoo
+    rate-limits, ``.info`` comes back empty and every ratio is None. Funds
+    and some foreign listings legitimately lack several of these fields.
+    """
+    return [
+        label for key, label in RATIO_LABELS.items()
+        if not isinstance(snapshot.get(key), (int, float))
+        or isinstance(snapshot.get(key), bool)
+    ]
+
+
 def _quarterly_trend(stmt: object, row: str, n: int = 4) -> dict[str, float]:
     """Extract ``{quarter-end: value}`` (newest first) for one income-statement line."""
     if not isinstance(stmt, pd.DataFrame) or stmt.empty or row not in stmt.index:
@@ -94,7 +121,8 @@ def format_fundamentals(snapshot: dict) -> str:
         f"  Market cap:        {_fmt_size(snapshot.get('market_cap'))}",
         f"  Profit margin:     {_fmt_num(snapshot.get('profit_margins'), pct=True)}",
         f"  Return on equity:  {_fmt_num(snapshot.get('return_on_equity'), pct=True)}",
-        f"  Debt/equity:       {_fmt_num(snapshot.get('debt_to_equity'))}",
+        # Yahoo quotes total debt / equity as a percentage (84.29 means 0.84x).
+        f"  Debt/equity (%):   {_fmt_num(snapshot.get('debt_to_equity'))}",
         f"  Revenue growth:    {_fmt_num(snapshot.get('revenue_growth'), pct=True)}",
         f"  Earnings growth:   {_fmt_num(snapshot.get('earnings_growth'), pct=True)}",
     ]

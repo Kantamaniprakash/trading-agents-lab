@@ -21,6 +21,10 @@ class MarketSnapshot:
     fundamentals: str | None = None
     news: list[str] | None = None
     anonymize: bool = False
+    # Facts about the data itself that change how it must be read (a partial
+    # session, a stale bar, incomplete fundamentals). Backtests never set it,
+    # so their prompts are unchanged.
+    data_notes: list[str] | None = None
 
     def context_block(self) -> str:
         """Render the full snapshot as one text block for agent prompts.
@@ -33,8 +37,11 @@ class MarketSnapshot:
         """
         ticker = "TICKER-X" if self.anonymize else self.ticker
         date = "Day T" if self.anonymize else self.date
-        parts = [
-            f"=== Market snapshot: {ticker} | analysis date: {date} ===",
+        parts = [f"=== Market snapshot: {ticker} | analysis date: {date} ==="]
+        if self.data_notes:
+            parts += ["", "--- Data notes (read before the tables) ---"]
+            parts += [f"- {note}" for note in self.data_notes]
+        parts += [
             "",
             "--- Recent price history (OHLCV) ---",
             self.price_table,

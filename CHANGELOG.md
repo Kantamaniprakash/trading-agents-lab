@@ -19,7 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   themselves from a snapshot, with `skill/build_skill.py` to package it as a ZIP and
   `skill/LISTING.md` with marketplace listing copy.
 - Data-quality notes on every desk snapshot: a partial intraday bar, a stale latest bar,
-  and missing fundamentals or headlines are reported instead of silently analysed.
+  and missing or incomplete fundamentals or headlines are reported instead of silently
+  analysed. The ones that change how the data must be read are also written into the
+  prompt (`MarketSnapshot.data_notes`), so the agents see them as well as the caller.
+- Desk snapshots retry Yahoo once when it answers with an empty payload, which is how it
+  responds to rate-limited requests.
 
 ### Changed
 - Caches and results resolve to `TRADINGLAB_HOME` when set, the source checkout when
@@ -31,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so an intraday reading is never served later as that day's close.
 - A failed fundamentals fetch is no longer passed to the fundamentals analyst as if it
   were a fundamentals block (desk path only).
+- The fundamentals block labels debt/equity as a percentage. Yahoo quotes it in percent,
+  so the unlabelled figure read as a leverage multiple a hundred times too large.
 
 ## [0.1.0] - 2026-07-05
 

@@ -116,7 +116,10 @@ def fetch_fundamentals_snapshot(ticker: str) -> dict   # best-effort, live-mode 
   try/except; return `{"available": False, "error": str(e)}` on failure.
 ```python
 def format_fundamentals(snapshot: dict) -> str   # human-readable block for agent prompts
+def missing_ratio_fields(snapshot: dict) -> list[str]   # labels of ratios with no number
 ```
+- Debt/equity is printed as `Debt/equity (%)`: Yahoo quotes it in percent, and an
+  unlabelled 84.29 reads as 84x leverage.
 - Document clearly: yfinance fundamentals are CURRENT, not point-in-time; using them in a
   historical backtest leaks future data, so the agent backtest only injects fundamentals when
   running in live mode.
@@ -411,15 +414,25 @@ def snapshot_to_dict(desk) -> dict
 def decision_to_dict(log, desk, usage=None, cost_usd=None) -> dict
 def render_decision_card(log, desk) -> str
 ```
-- `DeskSnapshot` = `MarketSnapshot` + `as_of`, `last_close`, `history_rows`, `live`,
-  `notes`. Building one makes NO LLM call, so it serves both the `snapshot` command (and
-  through it any external agent that runs the roles itself) and the `desk` command.
+- `DeskSnapshot` = `MarketSnapshot` + `as_of`, `fetched_at`, `last_close`, `history_rows`,
+  `live`, `partial_session`, `stale`, `fundamentals_missing`, `notes`. Building one makes
+  NO LLM call, so it serves both the `snapshot` command (and through it any external agent
+  that runs the roles itself) and the `desk` command.
 - **Lookahead guard**: fundamentals/news are injected only when the snapshot is for the
   latest bar. A past `date` never receives them (Yahoo serves current values only).
   `anonymize=True` also drops them, since company figures and headlines defeat masking.
-- **Nothing is dropped silently**: a skipped or failed input, a partial intraday bar and
-  a stale latest bar each add a line to `notes`. A failed fundamentals fetch yields
-  `fundamentals=None`, never an error string dressed up as a fundamentals block.
+- **Nothing is dropped silently**: a skipped, failed or incomplete input, a partial
+  intraday bar and a stale latest bar each add a line to `notes`. A failed fundamentals
+  fetch yields `fundamentals=None`, never an error string dressed up as a fundamentals
+  block. Yahoo answers a rate-limited request with `available: True` and no figures, so
+  "available" is not trusted: `missing_ratio_fields` counts the ratios that actually
+  arrived, an all-empty answer is retried once after `_RETRY_WAIT_S`, and whatever is
+  still missing is named.
+- **The agents are told too**: the notes that change how the data must be read (partial
+  session, stale bar, incomplete fundamentals) are copied into `MarketSnapshot.data_notes`
+  and rendered at the top of the context block. Advice aimed at the caller ("re-run in a
+  minute") stays out of the prompt. With no such notes the rendered block is byte-identical
+  to the backtest path's, so cached responses and published transcripts stay reproducible.
 - `fetch_latest_prices` re-downloads when the open-ended cache is older than
   `max_age_hours` OR its last bar was captured before that day's US close, so an intraday
   reading is never served later as the close. The session logic is US-centric by design.

@@ -171,9 +171,12 @@ python -m tradinglab.cli desk --ticker NVDA
 
 `snapshot` is also the quickest way to audit a prompt: `--date 2026-03-09 --anonymize`
 shows the masked block a backtest decision day was given. Past dates never receive
-fundamentals or news (Yahoo serves current values only, so they would leak the future),
-and a bar captured mid-session is flagged as partial rather than treated as a close.
-`desk` saves a transcript and a JSON record under `results/desk/`.
+fundamentals or news (Yahoo serves current values only, so they would leak the future).
+Data problems are reported rather than analysed: a bar captured mid-session is flagged as
+partial, a days-old bar as stale, and fundamentals that Yahoo returned empty or
+incomplete (its usual answer when rate-limiting) are named. The agents get the same
+warnings at the top of their prompt. `desk` saves a transcript and a JSON record under
+`results/desk/`.
 
 ## Use it from your coding agent (skill)
 
@@ -315,7 +318,7 @@ Findings a 3-month backtest could never show:
 
 ## Verification
 
-- 104 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
+- 111 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
   future rows → assert all earlier features/indicators/engine outputs are bit-identical).
 - A five-dimension adversarial review pass (lookahead, statistics, costs, data hygiene,
   prompt leakage — every finding independently re-verified before acceptance) surfaced

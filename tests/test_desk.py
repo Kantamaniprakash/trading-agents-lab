@@ -39,6 +39,20 @@ from tradinglab.data import news as news_mod
 
 NY = "America/New_York"
 
+FULL_FUNDAMENTALS = {
+    "available": True, "ticker": "ABC", "trailing_pe": 21.5, "forward_pe": 18.0,
+    "market_cap": 2.5e11, "profit_margins": 0.21, "return_on_equity": 0.3,
+    "debt_to_equity": 84.29, "revenue_growth": 0.12, "earnings_growth": 0.15,
+    "quarterly_revenue": {"2025-12-31": 1.0e10}, "quarterly_net_income": {},
+}
+ONE_HEADLINE = [{"title": "ABC beats estimates", "publisher": "Wire", "date": "2026-03-12"}]
+
+
+@pytest.fixture(autouse=True)
+def no_retry_wait(monkeypatch):
+    """The retry pause is real time; tests must not sleep through it."""
+    monkeypatch.setattr(desk_mod, "_RETRY_WAIT_S", 0.0)
+
 
 def _synthetic_df(n: int = 320, seed: int = 3, end: str = "2026-03-13") -> pd.DataFrame:
     rng = np.random.default_rng(seed)
@@ -173,13 +187,9 @@ def test_empty_ticker_raises():
 
 def test_live_snapshot_injects_fundamentals_and_news(monkeypatch):
     monkeypatch.setattr(
-        fundamentals_mod, "fetch_fundamentals_snapshot",
-        lambda t: {"available": True, "ticker": t, "trailing_pe": 21.5},
+        fundamentals_mod, "fetch_fundamentals_snapshot", lambda t: dict(FULL_FUNDAMENTALS)
     )
-    monkeypatch.setattr(
-        news_mod, "fetch_current_news",
-        lambda t: [{"title": "ABC beats estimates", "publisher": "Wire", "date": "2026-03-12"}],
-    )
+    monkeypatch.setattr(news_mod, "fetch_current_news", lambda t: list(ONE_HEADLINE))
     df = _synthetic_df()
     desk = build_desk_snapshot("ABC", df=df, now=_after_close(df))
     assert desk.live is True
@@ -187,7 +197,82 @@ def test_live_snapshot_injects_fundamentals_and_news(monkeypatch):
     assert desk.snapshot.news == ["2026-03-12 [Wire] ABC beats estimates"]
     block = desk.snapshot.context_block()
     assert "--- Fundamentals ---" in block and "ABC beats estimates" in block
-    assert desk.notes == []
+    assert desk.notes == [] and desk.fundamentals_missing == []
+    assert "Data notes" not in block
+
+
+def test_debt_to_equity_is_labelled_as_a_percentage():
+    """Yahoo quotes debt/equity in percent; an unlabelled 84.29 reads as 84x."""
+    assert "Debt/equity (%):   84.29" in fundamentals_mod.format_fundamentals(FULL_FUNDAMENTALS)
+
+
+def test_incomplete_fundamentals_are_named_to_caller_and_agents(monkeypatch):
+    partial = dict(FULL_FUNDAMENTALS, forward_pe=None, debt_to_equity=None)
+    monkeypatch.setattr(fundamentals_mod, "fetch_fundamentals_snapshot", lambda t: partial)
+    monkeypatch.setattr(news_mod, "fetch_current_news", lambda t: list(ONE_HEADLINE))
+    df = _synthetic_df()
+    desk = build_desk_snapshot("ABC", df=df, now=_after_close(df))
+    assert desk.fundamentals_missing == ["forward P/E", "debt/equity"]
+    assert any("forward P/E, debt/equity" in note for note in desk.notes)
+    block = desk.snapshot.context_block()
+    assert "--- Data notes (read before the tables) ---" in block
+    assert "no value was available for forward P/E, debt/equity" in block
+    assert "re-run" not in block  # advice for the caller stays out of the prompt
+    payload = snapshot_to_dict(desk)
+    assert payload["has_fundamentals"] is True
+    assert payload["fundamentals_missing"] == ["forward P/E", "debt/equity"]
+
+
+def test_rate_limited_empty_fundamentals_are_not_presented_as_data(monkeypatch):
+    """Yahoo answers a rate-limited request with ``available`` and no figures.
+    That must not reach the agents as a block of n/a lines with no warning."""
+    hollow = {"available": True, "ticker": "ABC", "quarterly_revenue": {},
+              "quarterly_net_income": {}}
+    monkeypatch.setattr(fundamentals_mod, "fetch_fundamentals_snapshot", lambda t: dict(hollow))
+    monkeypatch.setattr(news_mod, "fetch_current_news", lambda t: list(ONE_HEADLINE))
+    df = _synthetic_df()
+    desk = build_desk_snapshot("ABC", df=df, now=_after_close(df))
+    assert desk.snapshot.fundamentals is None
+    assert snapshot_to_dict(desk)["has_fundamentals"] is False
+    assert "--- Fundamentals ---" not in desk.snapshot.context_block()
+    assert any("no figures at all" in note for note in desk.notes)
+
+
+def test_empty_yahoo_answers_are_retried_once(monkeypatch):
+    calls = {"fundamentals": 0, "news": 0, "slept": []}
+
+    def fundamentals(ticker):
+        calls["fundamentals"] += 1
+        if calls["fundamentals"] == 1:
+            return {"available": True, "ticker": ticker}
+        return dict(FULL_FUNDAMENTALS)
+
+    def news(ticker):
+        calls["news"] += 1
+        return [] if calls["news"] == 1 else list(ONE_HEADLINE)
+
+    monkeypatch.setattr(fundamentals_mod, "fetch_fundamentals_snapshot", fundamentals)
+    monkeypatch.setattr(news_mod, "fetch_current_news", news)
+    monkeypatch.setattr(desk_mod, "_RETRY_WAIT_S", 6.0)
+    monkeypatch.setattr(desk_mod.time, "sleep", lambda s: calls["slept"].append(s))
+    df = _synthetic_df()
+    desk = build_desk_snapshot("ABC", df=df, now=_after_close(df))
+    assert calls == {"fundamentals": 2, "news": 2, "slept": [6.0]}
+    assert desk.notes == [] and desk.snapshot.news and desk.snapshot.fundamentals
+
+
+def test_complete_answers_are_not_retried(monkeypatch):
+    monkeypatch.setattr(
+        fundamentals_mod, "fetch_fundamentals_snapshot", lambda t: dict(FULL_FUNDAMENTALS)
+    )
+    monkeypatch.setattr(news_mod, "fetch_current_news", lambda t: list(ONE_HEADLINE))
+
+    def no_sleep(_s):
+        raise AssertionError("a complete answer must not trigger the retry pause")
+
+    monkeypatch.setattr(desk_mod.time, "sleep", no_sleep)
+    df = _synthetic_df()
+    build_desk_snapshot("ABC", df=df, now=_after_close(df))
 
 
 def test_live_failures_are_reported_not_passed_to_agents(monkeypatch):
@@ -223,11 +308,44 @@ def test_anonymized_snapshot_drops_live_data_and_hides_levels(monkeypatch):
     assert any("anonymization" in note for note in desk.notes)
 
 
-def test_partial_session_bar_is_flagged():
+def test_partial_session_bar_is_flagged_to_caller_and_agents():
     df = _synthetic_df()
     midday = pd.Timestamp(f"{df.index[-1]:%Y-%m-%d} 11:30", tz=NY)
     desk = build_desk_snapshot("ABC", live=False, df=df, now=midday)
+    assert desk.partial_session is True and desk.stale is False
     assert any("partial session" in note for note in desk.notes)
+    # The agents read only the context block, so the warning has to be in it,
+    # ahead of the tables that it qualifies.
+    block = desk.snapshot.context_block()
+    assert block.index("partial session") < block.index("--- Recent price history")
+    payload = snapshot_to_dict(desk)
+    assert payload["partial_session"] is True
+    assert "session still open" in desk_mod.price_phrase(desk)
+
+
+def test_clean_snapshot_prompt_is_identical_to_the_backtest_prompt():
+    """Data notes must be additive: with nothing to report, a desk snapshot
+    renders exactly what the backtest path renders, so cached LLM responses
+    and published transcripts stay reproducible."""
+    from tradinglab.agents.graph import snapshot_from_history
+
+    df = _synthetic_df()
+    desk = build_desk_snapshot("ABC", live=False, df=df, now=_after_close(df))
+    plain = snapshot_from_history(df, df.index[-1], "ABC", lookback=60)
+    assert desk.snapshot.context_block() == plain.context_block()
+    assert desk.snapshot.context_block().startswith(
+        "=== Market snapshot: ABC | analysis date: 2026-03-13 ===\n\n"
+        "--- Recent price history (OHLCV) ---\n"
+    )
+    assert desk.partial_session is False and "close " in desk_mod.price_phrase(desk)
+
+
+def test_snapshot_payload_carries_fetch_time_and_flags():
+    df = _synthetic_df()
+    payload = snapshot_to_dict(build_desk_snapshot("ABC", live=False, df=df, now=_after_close(df)))
+    assert pd.Timestamp(payload["fetched_at"]).tzinfo is not None
+    assert payload["fetched_at"].endswith("Z")
+    assert payload["partial_session"] is False and payload["stale"] is False
 
 
 def test_stale_latest_bar_is_flagged_but_weekend_is_not():
@@ -235,8 +353,10 @@ def test_stale_latest_bar_is_flagged_but_weekend_is_not():
     sunday = pd.Timestamp("2026-03-15 12:00", tz=NY)
     assert build_desk_snapshot("ABC", live=False, df=df, now=sunday).notes == []
     later = pd.Timestamp("2026-03-27 12:00", tz=NY)
-    notes = build_desk_snapshot("ABC", live=False, df=df, now=later).notes
-    assert any("14 days old" in note for note in notes)
+    stale = build_desk_snapshot("ABC", live=False, df=df, now=later)
+    assert stale.stale is True
+    assert any("14 days old" in note for note in stale.notes)
+    assert "14 days old" in stale.snapshot.context_block()
 
 
 # ---------------------------------------------------------------------------

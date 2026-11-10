@@ -11,7 +11,7 @@ runs the same snapshot through this repo's own API pipeline.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pandas as pd
@@ -35,6 +35,9 @@ _STALE_AFTER_DAYS = 5
 # is an approximation, and the notes say so.
 _NY_TZ = "America/New_York"
 _US_CLOSE_MINUTE = 16 * 60 + 15
+# Yahoo rate-limits bursts and then answers with empty payloads rather than
+# errors. One short pause and a second attempt recovers most of those.
+_RETRY_WAIT_S = 6.0
 
 
 def _before_us_close(ts: pd.Timestamp) -> bool:
@@ -94,27 +97,65 @@ class DeskSnapshot:
     last_close: float
     history_rows: int
     live: bool                   # fundamentals and/or news were injected
+    fetched_at: str = ""         # when the snapshot was built, UTC "YYYY-MM-DDTHH:MMZ"
+    partial_session: bool = False    # last bar is an unfinished US session
+    stale: bool = False              # latest bar is older than a long weekend
+    fundamentals_missing: list[str] = field(default_factory=list)
+    # Everything a caller should know. The subset that changes how the data
+    # must be read is also in ``snapshot.data_notes`` and so reaches the agents.
     notes: list[str] = field(default_factory=list)
 
 
-def _session_notes(as_of: pd.Timestamp, now: pd.Timestamp) -> list[str]:
-    """Data-quality notes about the last bar relative to ``now`` (New York time)."""
+def _session_state(as_of: pd.Timestamp, now: pd.Timestamp) -> tuple[bool, bool, list[str]]:
+    """``(partial_session, stale, notes)`` for the last bar relative to ``now``.
+
+    ``now`` is a New York timestamp. US-centric by design (see ``_NY_TZ``).
+    """
     notes: list[str] = []
     today = now.normalize().tz_localize(None)
-    if as_of == today and _before_us_close(now):
+    partial = bool(as_of == today and _before_us_close(now))
+    if partial:
         notes.append(
             f"The last bar ({as_of:%Y-%m-%d}) is dated today and US markets have "
-            "not closed yet: for a US listing it is a partial session, so its "
-            "OHLCV and every indicator value will change by the close."
+            "not closed yet: for a US listing it is a partial session. Its close "
+            "is only the latest price, its volume is a part-day count that must "
+            "not be compared with full days, and every indicator value will "
+            "change by the close."
         )
     age_days = (today - as_of).days
-    if age_days > _STALE_AFTER_DAYS:
+    stale = age_days > _STALE_AFTER_DAYS
+    if stale:
         notes.append(
             f"The latest available bar is {age_days} days old ({as_of:%Y-%m-%d}). "
             "The symbol may be halted, delisted or illiquid; treat the snapshot "
             "as stale."
         )
-    return notes
+    return partial, stale, notes
+
+
+def _fetch_live_inputs(ticker: str) -> tuple[dict, list[dict]]:
+    """Current fundamentals and headlines, with one retry for empty answers."""
+    from tradinglab.data.fundamentals import (
+        RATIO_LABELS,
+        fetch_fundamentals_snapshot,
+        missing_ratio_fields,
+    )
+    from tradinglab.data.news import fetch_current_news
+
+    def empty(raw: dict) -> bool:
+        return not raw.get("available") or len(missing_ratio_fields(raw)) == len(RATIO_LABELS)
+
+    raw = fetch_fundamentals_snapshot(ticker)
+    items = fetch_current_news(ticker)
+    if empty(raw) or not items:
+        time.sleep(_RETRY_WAIT_S)
+        if empty(raw):
+            second = fetch_fundamentals_snapshot(ticker)
+            if not empty(second):
+                raw = second
+        if not items:
+            items = fetch_current_news(ticker)
+    return raw, items
 
 
 def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
@@ -127,8 +168,10 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
     only injected when ``live`` is set AND the snapshot is for the latest bar
     AND it is not anonymized: Yahoo serves current values only, so adding them
     to a historical date would leak the future, and company headlines defeat
-    masking. Each skipped or failed input is recorded in ``notes`` rather than
-    silently dropped.
+    masking. Each skipped, failed or incomplete input is recorded in ``notes``
+    rather than silently dropped, and the notes that change how the data must
+    be read (partial session, stale bar, incomplete fundamentals) are also
+    written into the snapshot itself so the agents see them.
 
     ``df`` (canonical price frame) and ``now`` (tz-aware timestamp) exist for
     tests; by default prices are fetched and ``now`` is the New York clock.
@@ -152,7 +195,9 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
     historical = as_of < df.index[-1]
 
     notes: list[str] = []
+    data_notes: list[str] = []
     fundamentals: str | None = None
+    fundamentals_missing: list[str] = []
     news: list[str] | None = None
     if historical and not anonymize:
         notes.append(
@@ -172,21 +217,42 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
         )
     elif live:
         from tradinglab.data.fundamentals import (
-            fetch_fundamentals_snapshot,
+            RATIO_LABELS,
             format_fundamentals,
+            missing_ratio_fields,
         )
-        from tradinglab.data.news import fetch_current_news
 
-        raw = fetch_fundamentals_snapshot(ticker)
-        if raw.get("available"):
-            fundamentals = format_fundamentals(raw)
-        else:
+        raw, items = _fetch_live_inputs(ticker)
+        if not raw.get("available"):
             notes.append(
                 "Fundamentals unavailable from Yahoo "
                 f"({raw.get('error', 'unknown error')}); the fundamentals "
                 "analyst has nothing to work with."
             )
-        items = fetch_current_news(ticker)
+        else:
+            fundamentals_missing = missing_ratio_fields(raw)
+            has_quarters = bool(raw.get("quarterly_revenue") or raw.get("quarterly_net_income"))
+            if len(fundamentals_missing) == len(RATIO_LABELS) and not has_quarters:
+                notes.append(
+                    "Fundamentals unavailable: Yahoo answered with no figures at "
+                    "all (it does this when rate-limiting, and for symbols it has "
+                    "no company data on). The fundamentals analyst has nothing to "
+                    "work with; re-running in a minute may fix it."
+                )
+            else:
+                fundamentals = format_fundamentals(raw)
+                if fundamentals_missing:
+                    incomplete = (
+                        "Fundamentals are incomplete: no value was available for "
+                        f"{', '.join(fundamentals_missing)}. A missing figure is "
+                        "unknown, not zero."
+                    )
+                    data_notes.append(incomplete)
+                    notes.append(
+                        incomplete + " Funds and some foreign listings lack these "
+                        "fields; otherwise Yahoo is probably rate-limiting and a "
+                        "re-run in a minute fills them in."
+                    )
         news = [
             f"{item.get('date', '')} [{item.get('publisher', '')}] {item.get('title', '')}"
             for item in items
@@ -197,21 +263,30 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
                 "analysts have nothing to work with."
             )
 
+    partial = stale = False
     if not historical:
         if now is None:
             now = pd.Timestamp.now(tz=_NY_TZ)
-        notes += _session_notes(as_of, now)
+        partial, stale, session_notes = _session_state(as_of, now)
+        notes += session_notes
+        data_notes = session_notes + data_notes
 
     snapshot = snapshot_from_history(
         df, as_of, ticker, lookback=lookback, anonymize=anonymize,
         fundamentals=fundamentals, news=news,
     )
+    if data_notes:
+        snapshot = replace(snapshot, data_notes=data_notes)
     return DeskSnapshot(
         snapshot=snapshot,
         as_of=as_of.strftime("%Y-%m-%d"),
         last_close=float(history["close"].iloc[-1]),
         history_rows=len(history),
         live=bool(fundamentals or news),
+        fetched_at=pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%dT%H:%MZ"),
+        partial_session=partial,
+        stale=stale,
+        fundamentals_missing=fundamentals_missing,
         notes=notes,
     )
 
@@ -227,14 +302,17 @@ def snapshot_to_dict(desk: DeskSnapshot) -> dict:
     return {
         "ticker": snap.ticker,
         "as_of": desk.as_of,
+        "fetched_at": desk.fetched_at,
         "last_close": None if snap.anonymize else round(desk.last_close, 4),
+        "partial_session": desk.partial_session,
+        "stale": desk.stale,
         "history_rows": desk.history_rows,
-        "live": desk.live,
         "anonymized": snap.anonymize,
-        "context": snap.context_block(),
         "has_fundamentals": bool(snap.fundamentals),
+        "fundamentals_missing": list(desk.fundamentals_missing),
         "news_headlines": len(snap.news or []),
         "notes": list(desk.notes),
+        "context": snap.context_block(),
         "disclaimer": DISCLAIMER,
     }
 
@@ -279,6 +357,9 @@ def decision_to_dict(log: AgentDayLog, desk: DeskSnapshot,
             {"speaker": turn.speaker, "text": turn.text}
             for turn in log.debate.transcript
         ],
+        "fetched_at": desk.fetched_at,
+        "partial_session": desk.partial_session,
+        "stale": desk.stale,
         "live": desk.live,
         "anonymized": desk.snapshot.anonymize,
         "notes": list(desk.notes),
@@ -288,12 +369,20 @@ def decision_to_dict(log: AgentDayLog, desk: DeskSnapshot,
     }
 
 
+def price_phrase(desk: DeskSnapshot) -> str:
+    """How to describe ``last_close``: a close, or a mid-session price."""
+    if desk.snapshot.anonymize:
+        return "close masked"
+    if desk.partial_session:
+        return f"last price {desk.last_close:.2f}, session still open"
+    return f"close {desk.last_close:.2f}"
+
+
 def render_decision_card(log: AgentDayLog, desk: DeskSnapshot) -> str:
     """Short plain-text summary of a desk decision for terminal output."""
     size = float(log.final_size)
-    close = "masked" if desk.snapshot.anonymize else f"{desk.last_close:.2f}"
     lines = [
-        f"=== AI trading desk — {log.ticker} — as of {desk.as_of} (close {close}) ===",
+        f"=== AI trading desk — {log.ticker} — as of {desk.as_of} ({price_phrase(desk)}) ===",
         f"FINAL DECISION:   {log.final_action} {size:.2f}  "
         f"({exposure_phrase(log.final_action, size)})",
         f"Research verdict: {log.debate.verdict} — {log.debate.rationale}",

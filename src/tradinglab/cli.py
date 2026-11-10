@@ -478,7 +478,7 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
     No LLM call and no API key: this is the data half of the pipeline, for
     inspecting prompts or for an external agent that runs the roles itself.
     """
-    from tradinglab.agents.desk import DISCLAIMER, snapshot_to_dict
+    from tradinglab.agents.desk import DISCLAIMER, price_phrase, snapshot_to_dict
 
     desk = _build_desk_snapshot_or_exit(args)
     payload = snapshot_to_dict(desk)
@@ -489,12 +489,14 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
     print(payload["context"])
     print("\n--- Snapshot metadata ---")
     print(f"ticker: {payload['ticker']}")
-    close = "masked" if payload["last_close"] is None else f"{payload['last_close']:.2f}"
-    print(f"as of: {payload['as_of']} (close {close}, {payload['history_rows']} daily bars)")
     print(
-        f"fundamentals: {'yes' if payload['has_fundamentals'] else 'no'} | "
-        f"news headlines: {payload['news_headlines']}"
+        f"as of: {payload['as_of']} ({price_phrase(desk)}, "
+        f"{payload['history_rows']} daily bars), fetched {payload['fetched_at']}"
     )
+    fundamentals = "yes" if payload["has_fundamentals"] else "no"
+    if payload["fundamentals_missing"]:
+        fundamentals += f" (missing: {', '.join(payload['fundamentals_missing'])})"
+    print(f"fundamentals: {fundamentals} | news headlines: {payload['news_headlines']}")
     for note in payload["notes"]:
         print(f"note: {note}")
     print(f"\n{DISCLAIMER}")
