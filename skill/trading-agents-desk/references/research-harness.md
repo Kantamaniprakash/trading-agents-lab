@@ -2,8 +2,9 @@
 
 Use this when the user asks whether the desk works, wants a backtest, or
 wants to compare against simpler strategies. Everything runs through
-`python -m tradinglab.cli <command>`. Output tables print to the terminal.
-CSV files, figures and transcripts are saved under `~/.tradinglab/results/`.
+`~/.tradinglab/venv/bin/tradinglab <command>` (see Setup in `SKILL.md`).
+Output tables print to the terminal. CSV files, figures and transcripts are
+saved under `~/.tradinglab/results/`.
 
 ## Why a naive backtest of an LLM is wrong
 
@@ -14,7 +15,9 @@ this three ways, and you should use them in this order.
 1. **Probe the window.** Ask the model to recall prices and monthly direction
    with no data in the prompt. This measures the leak instead of assuming it.
 2. **Anonymize.** Mask the ticker and dates, and rebase prices to an index
-   that starts at 100, so the model cannot recognise the stock.
+   that starts at 100, so the model is much less likely to recognise the
+   stock. The shape of the price path can still give it away: this reduces
+   leakage, it does not remove it.
 3. **Prefer recent windows.** Only data after the model's knowledge cutoff is
    fully clean.
 
@@ -23,15 +26,15 @@ this three ways, and you should use them in this order.
 No API key needed:
 
 ```bash
-python -m tradinglab.cli download
+~/.tradinglab/venv/bin/tradinglab download
 ```
 
 ```bash
-python -m tradinglab.cli baselines
+~/.tradinglab/venv/bin/tradinglab baselines
 ```
 
 ```bash
-python -m tradinglab.cli train-ml
+~/.tradinglab/venv/bin/tradinglab train-ml
 ```
 
 - `download` caches daily prices for the 10-ticker default universe from
@@ -41,22 +44,34 @@ python -m tradinglab.cli train-ml
 - `train-ml` runs a walk-forward LightGBM model with embargoed splits, tested
   from 2021.
 
-Needs `ANTHROPIC_API_KEY` and spends the user's API credit. Ask first.
+The next two need `ANTHROPIC_API_KEY` and spend the user's API credit. Work
+out the cost and ask before each run.
 
 ```bash
-python -m tradinglab.cli probe --ticker AAPL --start 2024-01-02 --end 2024-03-28
+~/.tradinglab/venv/bin/tradinglab probe --ticker AAPL --start 2024-01-02 --end 2024-03-28
 ```
 
 ```bash
-python -m tradinglab.cli agents --ticker AAPL --start 2026-03-01 --end 2026-06-01 --every 5 --anonymize
+~/.tradinglab/venv/bin/tradinglab agents --ticker AAPL --start 2026-03-01 --end 2026-06-01 --every 5 --anonymize
 ```
 
-- `probe` prints a verdict: CONTAMINATED, LIKELY CLEAN or INCONCLUSIVE.
-- `agents` backtests the desk. `--every 5` decides weekly. `--max-days N`
-  caps the number of decisions. One decision costs roughly $0.20 to $0.50,
-  and repeated runs are free because every response is cached on disk.
+- `probe` prints a verdict: CONTAMINATED, LIKELY CLEAN or INCONCLUSIVE. It
+  costs a few cents.
+- `agents` backtests the desk. One decision costs roughly $0.20 to $0.50.
+  Without `--every` it decides on every trading day, about 63 decisions and
+  $13 to $32 for one quarter. Always pass `--every` (5 decides weekly) or
+  `--max-days N` (caps the number of decisions), multiply the number of
+  decisions by the cost, and tell the user the total before running. A
+  repeat of the same historical window is free, because every response is
+  cached on disk and past prices do not change.
+- `download` and `train-ml` cost nothing but are not instant. Say so before
+  starting them.
 
-`python -m tradinglab.cli report` reprints the saved result tables.
+This one reprints the saved result tables and costs nothing:
+
+```bash
+~/.tradinglab/venv/bin/tradinglab report
+```
 
 ## Rules the engine enforces
 
@@ -68,7 +83,11 @@ python -m tradinglab.cli agents --ticker AAPL --start 2026-03-01 --end 2026-06-0
 
 ## Reference results (from the package's repository)
 
-Anonymized agent run, one ticker, 1 March to 1 June 2026, 64 trading days:
+Agent run on AAPL with the ticker and dates masked, 1 March to 1 June 2026,
+64 trading days. It is a reduced setup: price data only, so of the four
+analysts only the market analyst ran. It used the older masking, in which
+real price levels were still visible, and no probe result is published for
+this window.
 
 | Strategy | Return | Sharpe | Max drawdown |
 |---|---:|---:|---:|

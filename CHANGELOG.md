@@ -5,38 +5,48 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-11-10
 
 ### Added
 - `cli snapshot`: prints the exact market snapshot the agents see for one ticker (prices,
-  indicators, returns, and for the latest close fundamentals and headlines) as text or
-  JSON. Needs no API key, so it doubles as a prompt inspector and as the data source for
+  indicators, returns, and for the newest bar fundamentals and headlines) as text or JSON.
+  Needs no API key, so it doubles as a prompt inspector and as the data source for
   external agents.
-- `cli desk`: one-shot agent decision on the latest close from the terminal, matching the
-  dashboard's AI Trading Desk. Writes a transcript and a JSON record to `results/desk/`.
+- `cli desk`: one agent decision on the newest bar from the terminal. Saves a transcript
+  and a JSON record under `results/desk/`. It exits before any LLM call when the snapshot
+  is stale, prices are behind, or live data was wanted and none came back
+  (`--allow-degraded` overrides).
+- Data-quality reporting on the desk path. Prices are downloaded fresh for every snapshot
+  (a download under 15 minutes old is reused) into a desk-only cache folder. Whether the
+  newest bar is an unfinished session is decided on the exchange's own clock and reported
+  as `true`, `false` or unknown. A stale bar, prices that could not be refreshed, a newest
+  session Yahoo returned no usable bar for, and empty or incomplete fundamentals each
+  produce a note, and the notes that change how the data must be read are written into the
+  prompt as well (`MarketSnapshot.data_notes`).
 - Agent skill in `skill/trading-agents-desk/` (a `SKILL.md` plus role briefs and a harness
   reference) that lets Claude Code, Codex, Cursor and similar agents run the desk
-  themselves from a snapshot, with `skill/build_skill.py` to package it as a ZIP and
-  `skill/LISTING.md` with marketplace listing copy.
-- Data-quality notes on every desk snapshot: a partial intraday bar, a stale latest bar,
-  and missing or incomplete fundamentals or headlines are reported instead of silently
-  analysed. The ones that change how the data must be read are also written into the
-  prompt (`MarketSnapshot.data_notes`), so the agents see them as well as the caller.
-- Desk snapshots retry Yahoo once when it answers with an empty payload, which is how it
-  responds to rate-limited requests.
+  themselves from a snapshot. `skill/build_skill.py` packages it as a ZIP and refuses to
+  when the release tag the skill installs from cannot be downloaded; `skill/LISTING.md`
+  has marketplace listing copy.
+- A `tradinglab` console command, equivalent to `python -m tradinglab.cli`.
 
 ### Changed
 - Caches and results resolve to `TRADINGLAB_HOME` when set, the source checkout when
   running from one (unchanged behaviour), and `~/.tradinglab` for a regular `pip install`,
   which previously wrote inside the interpreter's `lib` directory.
+- The fundamentals block labels debt/equity as a percentage (`Debt/equity (%)`). Yahoo
+  quotes it in percent, so the bare figure read as a leverage multiple a hundred times too
+  large. This changes the live prompts of `agents --live` and the dashboard desk.
+- Headlines are collapsed to a single line of at most 200 characters, so third-party text
+  cannot pose as a section of the prompt.
+- The error for an empty price download no longer blames the symbol alone: Yahoo answers
+  rate-limited requests the same way.
 
 ### Fixed
-- Desk snapshots re-download a cached price file whose last bar was captured mid-session,
-  so an intraday reading is never served later as that day's close.
-- A failed fundamentals fetch is no longer passed to the fundamentals analyst as if it
-  were a fundamentals block (desk path only).
-- The fundamentals block labels debt/equity as a percentage. Yahoo quotes it in percent,
-  so the unlabelled figure read as a leverage multiple a hundred times too large.
+- `--anonymize` no longer rewrites the tables for tickers that are also words or labels.
+  The ticker scrub ran over the whole block, so ticker `T` turned row label `T-9` into
+  `TICKER-X-9` and ticker `LOW` erased the `low` column. It now touches only the
+  third-party text (fundamentals and headlines).
 
 ## [0.1.0] - 2026-07-05
 
@@ -62,4 +72,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   markdown transcripts for explainability, and a 62-test pytest suite including no-lookahead
   perturbation tests.
 
+[0.2.0]: https://github.com/Kantamaniprakash/trading-agents-lab/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Kantamaniprakash/trading-agents-lab/releases/tag/v0.1.0
