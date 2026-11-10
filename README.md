@@ -115,7 +115,7 @@ With [uv](https://docs.astral.sh/uv/) (reproducible — installs the exact locke
 
 ```bash
 uv sync --locked
-uv run pytest tests/ -q             # 62 tests, incl. no-lookahead perturbation tests
+uv run pytest tests/ -q             # incl. no-lookahead perturbation tests
 
 uv run python -m tradinglab.cli download   # 10 tickers, 2015 → today (cached parquet)
 uv run python -m tradinglab.cli baselines  # the paper's 5 rule strategies, full history
@@ -154,6 +154,44 @@ token/cost summary after every run; repeated runs hit the disk cache and cost no
 **For a trustworthy evaluation of the agent layer, only use windows after the model's
 knowledge cutoff, or `--anonymize`.** Backtesting an LLM on dates it was trained through
 measures memory, not skill — this is the paper's central flaw.
+
+### One ticker, right now
+
+Two commands cover the "what does the desk think of this stock today?" case without a
+backtest window:
+
+```bash
+# No API key: print exactly what the agents would see (prices, indicators, returns,
+# current fundamentals + headlines), with data-quality notes. Add --json for one document.
+python -m tradinglab.cli snapshot --ticker NVDA
+
+# Needs ANTHROPIC_API_KEY: run the full desk once on that snapshot (~$0.20–0.50).
+python -m tradinglab.cli desk --ticker NVDA
+```
+
+`snapshot` is also the quickest way to audit a prompt: `--date 2026-03-09 --anonymize`
+shows the masked block a backtest decision day was given. Past dates never receive
+fundamentals or news (Yahoo serves current values only, so they would leak the future),
+and a bar captured mid-session is flagged as partial rather than treated as a close.
+`desk` saves a transcript and a JSON record under `results/desk/`.
+
+## Use it from your coding agent (skill)
+
+[`skill/trading-agents-desk/`](skill/trading-agents-desk/) packages the desk as an
+[agent skill](https://agentskills.io): a `SKILL.md` plus role briefs that Claude Code,
+Codex, Cursor and similar agents can load. The agent runs `snapshot` for the evidence and
+then plays the twelve roles itself, so **no Anthropic API key is needed** — the host
+agent's own model does the reasoning. Ask it to "analyze NVDA" and you get a sized
+BUY / SELL / HOLD view, the strongest argument on each side, and what would change it.
+
+- **Claude Code:** copy the folder to `~/.claude/skills/trading-agents-desk/` (or
+  `.claude/skills/` inside a project).
+- **Marketplaces:** `python skill/build_skill.py` writes `dist/trading-agents-desk.zip`;
+  listing copy and the upload checklist are in [`skill/LISTING.md`](skill/LISTING.md).
+
+One limit is deliberate. An agent that runs the roles itself knows which ticker and date
+it asked for, so that mode cannot be anonymized and is only sound for live analysis. The
+skill sends historical evaluation through `agents --anonymize` and `probe` instead.
 
 ## Trader dashboard (no code needed)
 
@@ -277,7 +315,7 @@ Findings a 3-month backtest could never show:
 
 ## Verification
 
-- 62 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
+- 104 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
   future rows → assert all earlier features/indicators/engine outputs are bit-identical).
 - A five-dimension adversarial review pass (lookahead, statistics, costs, data hygiene,
   prompt leakage — every finding independently re-verified before acceptance) surfaced

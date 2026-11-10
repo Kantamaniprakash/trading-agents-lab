@@ -34,8 +34,13 @@ trading-agents-lab/
 ├── cache/llm/                   # LLM response disk cache (json files)
 ├── results/                     # metrics tables, equity plots, agent transcripts
 │   ├── figures/                 # README figures (rendered by scripts/make_figures.py)
-│   └── transcripts/             # per-decision-day agent debate transcripts
+│   ├── transcripts/             # per-decision-day agent debate transcripts (backtests)
+│   └── desk/                    # one-shot `desk` runs: transcript + JSON (git-ignored)
 ├── scripts/make_figures.py      # regenerates the README figures from results + cache
+├── skill/
+│   ├── trading-agents-desk/     # agent skill: SKILL.md + references/ (text only)
+│   ├── build_skill.py           # validates the skill and writes dist/<name>.zip
+│   └── LISTING.md               # marketplace listing copy + upload checklist
 ├── src/tradinglab/
 │   ├── __init__.py
 │   ├── config.py                # central path constants + config dataclasses
@@ -43,9 +48,9 @@ trading-agents-lab/
 │   ├── features/{__init__,indicators,dataset}.py
 │   ├── models/{__init__,ml}.py
 │   ├── backtest/{__init__,metrics,engine,baselines}.py
-│   ├── agents/{__init__,llm,state,prompts,roles,graph}.py
+│   ├── agents/{__init__,llm,state,prompts,roles,graph,desk,probe}.py
 │   └── cli.py
-└── tests/test_{indicators,metrics,engine,dataset,agents_backtest}.py
+└── tests/test_{indicators,metrics,engine,dataset,agents_backtest,probe,desk,skill_package}.py
 ```
 
 ## 3. Shared conventions (every module MUST follow these)
@@ -74,6 +79,12 @@ Dataclasses `DataConfig`, `BacktestConfig`, `MLConfig`, `AgentConfig`, `LabConfi
 `PROJECT_ROOT`, `DATA_CACHE_DIR`, `LLM_CACHE_DIR`, `RESULTS_DIR` path constants.
 Every module reads its configuration from `src/tradinglab/config.py`; nothing else
 defines paths or tunables.
+
+`PROJECT_ROOT` (the parent of the caches and `results/`) resolves in this order:
+`TRADINGLAB_HOME` when set; the source checkout when the package runs from one
+(recognised by its `pyproject.toml`); otherwise `~/.tradinglab`. The last case is a
+regular `pip install`, where the checkout-relative path would land inside the
+interpreter's `lib` directory.
 
 ## 5. Module contracts
 
@@ -391,7 +402,30 @@ def run_agent_backtest(df, ticker, start, end, client, cfg, out_dir=None, every=
   `{out_dir}/{ticker}_{date}.md` when out_dir given. Print one progress line per decision
   day (this is CLI-adjacent, allowed here).
 
-### 5.15 cli.py
+### 5.15 agents/desk.py — one ticker, one snapshot, one decision
+```python
+def fetch_latest_prices(ticker, max_age_hours=24.0, cache_dir=None) -> pd.DataFrame
+def build_desk_snapshot(ticker, date=None, live=True, anonymize=False, lookback=60,
+                        df=None, now=None) -> DeskSnapshot
+def snapshot_to_dict(desk) -> dict
+def decision_to_dict(log, desk, usage=None, cost_usd=None) -> dict
+def render_decision_card(log, desk) -> str
+```
+- `DeskSnapshot` = `MarketSnapshot` + `as_of`, `last_close`, `history_rows`, `live`,
+  `notes`. Building one makes NO LLM call, so it serves both the `snapshot` command (and
+  through it any external agent that runs the roles itself) and the `desk` command.
+- **Lookahead guard**: fundamentals/news are injected only when the snapshot is for the
+  latest bar. A past `date` never receives them (Yahoo serves current values only).
+  `anonymize=True` also drops them, since company figures and headlines defeat masking.
+- **Nothing is dropped silently**: a skipped or failed input, a partial intraday bar and
+  a stale latest bar each add a line to `notes`. A failed fundamentals fetch yields
+  `fundamentals=None`, never an error string dressed up as a fundamentals block.
+- `fetch_latest_prices` re-downloads when the open-ended cache is older than
+  `max_age_hours` OR its last bar was captured before that day's US close, so an intraday
+  reading is never served later as the close. The session logic is US-centric by design.
+- No prints (library code); the CLI does all output.
+
+### 5.16 cli.py
 argparse with subcommands (all print readable tables and save CSV/PNG to results/):
 - `download` — fetch universe, print row counts per ticker.
 - `baselines [--tickers ...] [--start] [--end] [--cost-bps]` — run all 5 baselines per
@@ -405,6 +439,14 @@ argparse with subcommands (all print readable tables and save CSV/PNG to results
   [--long-only] [--max-days N]` — needs API key; runs agent backtest; `--live` additionally
   fetches fundamentals+news (only sensible when end ≈ today); prints final metrics and
   token usage/cost summary; transcripts to `results/transcripts/`.
+- `snapshot --ticker AAPL [--date] [--no-live] [--anonymize] [--json]` — no API key; prints
+  the exact context block the agents see plus metadata and data-quality notes (`--json`:
+  one JSON document on stdout).
+- `desk --ticker AAPL [--date] [--no-live] [--anonymize] [--json] [--debate-rounds N]` —
+  needs API key; one `pipeline.decide` on that snapshot; prints a decision card and the
+  token usage/cost table; saves `results/desk/{ticker}_{as_of}.md` and `.json`. Kept out
+  of `results/transcripts/`, which the dashboard replays as backtest decision days. With
+  `--json`, stdout carries the JSON only and progress goes to stderr.
 - `report` — load saved CSVs and print a combined summary.
 main() entry: `python -m tradinglab.cli <cmd>`.
 
@@ -429,6 +471,15 @@ main() entry: `python -m tradinglab.cli <cmd>`.
   `--max-days` caps decision count without shrinking the evaluation window; CLI rejects
   non-positive `--every`/`--max-days`; price download end date is inclusive — all with
   the agent pipeline stubbed and yfinance monkeypatched (no network, no API calls).
+- **test_desk.py**: workspace resolution (env override, checkout, installed-package
+  fallback); desk snapshot no-lookahead (perturb rows after the analysis date → identical
+  context block); past dates and anonymized snapshots never fetch live data; failed
+  fetches become notes, not prompt text; partial-session and stale-bar notes; the
+  latest-price cache policy; `snapshot` / `desk` CLI output and artifacts with the
+  pipeline stubbed.
+- **test_skill_package.py**: skill frontmatter and packaging rules; every
+  `python -m tradinglab.cli ...` line in the skill's docs is parsed with the real argparse
+  parser, so renaming a subcommand or flag fails a test instead of a user's terminal.
 - Tests must not hit the network — construct synthetic DataFrames (seeded RNG, ~400 rows,
   business-day index).
 

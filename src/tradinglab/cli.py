@@ -5,6 +5,8 @@ Subcommands:
     baselines  run the paper's five rule baselines + equal-weight portfolio
     train-ml   walk-forward LightGBM alpha model vs buy-and-hold
     agents     LLM multi-agent backtest for one ticker (needs ANTHROPIC_API_KEY)
+    snapshot   print the market snapshot the agents see for one ticker (no API key)
+    desk       one-shot agent decision on the latest close (needs ANTHROPIC_API_KEY)
     probe      memorization probe: can the LLM recall a window? (needs ANTHROPIC_API_KEY)
     report     print a combined summary of previously saved result CSVs
 
@@ -456,6 +458,102 @@ def cmd_agents(args: argparse.Namespace) -> None:
     print(f"transcripts: {out_dir}")
 
 
+def _build_desk_snapshot_or_exit(args: argparse.Namespace):
+    """Shared snapshot construction for ``snapshot`` and ``desk`` (exit 1 on bad input)."""
+    from tradinglab.agents.desk import build_desk_snapshot
+
+    try:
+        return build_desk_snapshot(
+            args.ticker, date=args.date, live=not args.no_live,
+            anonymize=args.anonymize, lookback=AgentConfig().lookback_days,
+        )
+    except ValueError as exc:  # unknown symbol, empty ticker, date before history
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_snapshot(args: argparse.Namespace) -> None:
+    """Print the market snapshot the agents would see for one ticker.
+
+    No LLM call and no API key: this is the data half of the pipeline, for
+    inspecting prompts or for an external agent that runs the roles itself.
+    """
+    from tradinglab.agents.desk import DISCLAIMER, snapshot_to_dict
+
+    desk = _build_desk_snapshot_or_exit(args)
+    payload = snapshot_to_dict(desk)
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    print(payload["context"])
+    print("\n--- Snapshot metadata ---")
+    print(f"ticker: {payload['ticker']}")
+    close = "masked" if payload["last_close"] is None else f"{payload['last_close']:.2f}"
+    print(f"as of: {payload['as_of']} (close {close}, {payload['history_rows']} daily bars)")
+    print(
+        f"fundamentals: {'yes' if payload['has_fundamentals'] else 'no'} | "
+        f"news headlines: {payload['news_headlines']}"
+    )
+    for note in payload["notes"]:
+        print(f"note: {note}")
+    print(f"\n{DISCLAIMER}")
+
+
+def cmd_desk(args: argparse.Namespace) -> None:
+    """Run the full agent pipeline once on a single snapshot and report the decision."""
+    # Heavy imports (anthropic) deferred so key-less environments can still
+    # run download/baselines/train-ml/snapshot/report.
+    from tradinglab.agents.desk import decision_to_dict, render_decision_card
+    from tradinglab.agents.graph import TradingAgentsPipeline
+    from tradinglab.agents.llm import LLMClient
+
+    # With --json, stdout carries the JSON document only; progress goes to stderr.
+    info = sys.stderr if args.json else sys.stdout
+
+    desk = _build_desk_snapshot_or_exit(args)
+    agent_cfg = AgentConfig(debate_rounds=args.debate_rounds)
+    print(
+        f"{desk.snapshot.ticker}: running the agent desk as of {desk.as_of} "
+        f"(debate rounds={agent_cfg.debate_rounds}, live data={desk.live}, "
+        f"anonymize={args.anonymize})",
+        file=info,
+    )
+
+    client = LLMClient(agent_cfg, cache_dir=LLM_CACHE_DIR)
+    try:
+        log = TradingAgentsPipeline(client, agent_cfg).decide(desk.snapshot)
+    except RuntimeError as exc:  # missing API key surfaces here
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    usage_table = _usage_table(client.usage)
+    cost = float(usage_table.loc["TOTAL", "cost_usd"]) if not usage_table.empty else 0.0
+    payload = decision_to_dict(log, desk, usage=client.usage, cost_usd=cost)
+
+    # Kept apart from results/transcripts/, which holds backtest decision days
+    # that the dashboard replays into equity curves.
+    out_dir = RESULTS_DIR / "desk"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{desk.snapshot.ticker}_{desk.as_of}"
+    md_path = out_dir / f"{stem}.md"
+    json_path = out_dir / f"{stem}.json"
+    md_path.write_text(log.to_markdown(), encoding="utf-8")
+    payload["transcript_path"] = str(md_path)
+    with open(json_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print()
+        print(render_decision_card(log, desk))
+        if not usage_table.empty:
+            _print_table(usage_table, "Token usage / cost (USD)")
+    print(f"\nsaved: {md_path}", file=info)
+    print(f"saved: {json_path}", file=info)
+
+
 def cmd_probe(args: argparse.Namespace) -> None:
     """Probe the backbone LLM for memorized knowledge of a price window."""
     # Heavy imports (anthropic) deferred so key-less environments can still
@@ -637,6 +735,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ag.add_argument("--cost-bps", type=float, default=bt_defaults.cost_bps)
     p_ag.set_defaults(func=cmd_agents)
+
+    def _add_snapshot_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--ticker", required=True)
+        p.add_argument(
+            "--date", default=None,
+            help="analysis date YYYY-MM-DD (default: latest available close)",
+        )
+        p.add_argument(
+            "--no-live", action="store_true",
+            help="skip current fundamentals + news (prices and indicators only)",
+        )
+        p.add_argument(
+            "--anonymize", action="store_true",
+            help="mask ticker/dates and rebase price levels (drops fundamentals + news)",
+        )
+        p.add_argument("--json", action="store_true", help="print one JSON document")
+
+    p_sn = sub.add_parser(
+        "snapshot",
+        help="print the market snapshot the agents see for one ticker (no API key)",
+    )
+    _add_snapshot_args(p_sn)
+    p_sn.set_defaults(func=cmd_snapshot)
+
+    p_dk = sub.add_parser(
+        "desk",
+        help="one-shot agent decision on the latest close (needs API key)",
+    )
+    _add_snapshot_args(p_dk)
+    p_dk.add_argument(
+        "--debate-rounds", type=_positive_int, default=AgentConfig().debate_rounds,
+        help="bull/bear exchanges before the verdict (>= 1)",
+    )
+    p_dk.set_defaults(func=cmd_desk)
 
     p_pr = sub.add_parser(
         "probe",

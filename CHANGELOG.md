@@ -5,6 +5,33 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `cli snapshot`: prints the exact market snapshot the agents see for one ticker (prices,
+  indicators, returns, and for the latest close fundamentals and headlines) as text or
+  JSON. Needs no API key, so it doubles as a prompt inspector and as the data source for
+  external agents.
+- `cli desk`: one-shot agent decision on the latest close from the terminal, matching the
+  dashboard's AI Trading Desk. Writes a transcript and a JSON record to `results/desk/`.
+- Agent skill in `skill/trading-agents-desk/` (a `SKILL.md` plus role briefs and a harness
+  reference) that lets Claude Code, Codex, Cursor and similar agents run the desk
+  themselves from a snapshot, with `skill/build_skill.py` to package it as a ZIP and
+  `skill/LISTING.md` with marketplace listing copy.
+- Data-quality notes on every desk snapshot: a partial intraday bar, a stale latest bar,
+  and missing fundamentals or headlines are reported instead of silently analysed.
+
+### Changed
+- Caches and results resolve to `TRADINGLAB_HOME` when set, the source checkout when
+  running from one (unchanged behaviour), and `~/.tradinglab` for a regular `pip install`,
+  which previously wrote inside the interpreter's `lib` directory.
+
+### Fixed
+- Desk snapshots re-download a cached price file whose last bar was captured mid-session,
+  so an intraday reading is never served later as that day's close.
+- A failed fundamentals fetch is no longer passed to the fundamentals analyst as if it
+  were a fundamentals block (desk path only).
+
 ## [0.1.0] - 2026-07-05
 
 ### Added
