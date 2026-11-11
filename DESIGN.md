@@ -468,7 +468,9 @@ def render_decision_card(log, desk) -> str
   metadata request returns, and a sidecar whose fingerprint does not match the parquet is
   ignored, so neither an interrupted run nor a failed cache write can leave prices judged
   by another download's time and calendar. A download whose session state came out
-  undecided is not reused from the 15-minute window: a second look is what settles it. Cache writes are best-effort: an unwritable
+  undecided is not reused from the 15-minute window: a second look is what settles it.
+  If that second look fails, the first is returned as it was (minutes old, still
+  undecided), not flagged as behind. Cache writes are best-effort: an unwritable
   directory costs the cache, not the run.
 - **Session state uses the exchange's own clock.** Yahoo dates a daily bar by the
   exchange's local day and includes the session in progress. `_fetch_session_info` reads
@@ -478,13 +480,15 @@ def render_decision_card(log, desk) -> str
   half-days. The calendar is cross-checked, not trusted: it has been seen an hour early
   for a venue, with trades still printing. A trade stamped up to an hour (plus the settle
   window) after the calendar's close means "unknown" until the feed has been quiet for
-  `_FEED_QUIET` (45 min); one stamped later than that is a late-reported print (London),
-  and an index is exempt altogether, because Yahoo publishes index closes about an hour
-  after the bell. A last trade before the close keeps the bar open for `_MAX_FEED_DELAY`
-  (30 min) past the settle window, because Yahoo's quotes run 10 to 20 minutes behind on
-  many venues. Known limit: where the calendar is an hour early AND the feed is delayed,
-  a delayed trade can fall in the 15 minutes after the calendar's close and the bar is
-  called final up to 15 minutes too soon. Without a calendar,
+  `_FEED_QUIET` (45 min); one stamped later than that is a late-reported print (London).
+  A late stamp on an index is ignored, because Yahoo publishes index closes about an hour
+  after the bell (cost: an index on a venue whose calendar is early is called a close).
+  A last trade before the close keeps the bar open for `_MAX_FEED_DELAY` (30 min) past
+  the settle window, for indices too, because Yahoo's quotes run 10 to 20 minutes behind
+  on many venues. Known limit: where the calendar is an hour early, a trade stamped in
+  the 15 minutes after its close is read as the closing print, so the bar is called final
+  while the session still has most of an hour to run: for up to 15 minutes with a delayed
+  feed, and for a thinly traded symbol as long as its latest trade sits in that window. Without a calendar,
   only plainly old bars (36 h rule) and US-style symbols (New York clock) are decided;
   anything else is `None` and reported as unknown, never guessed as a close. If Yahoo reports trading on a later day than the newest usable bar
   (it sometimes returns a row with volume and no prices, which the loader drops), the
@@ -500,7 +504,8 @@ def render_decision_card(log, desk) -> str
   halted symbol. The holiday / halted wording follows the bar's age when it was
   downloaded: after a failed refresh a bar can be old only because the download is.
 - **Currencies.** The chart metadata's currency is what prices are quoted in; a note says
-  so for anything but USD and spells out minor units (GBp is pence). Statements are often
+  so for anything but USD, for past dates as well as the newest bar, and spells out minor
+  units (GBp is pence). Statements are often
   in another currency (`financialCurrency`): the quarterly lines carry it, and a note
   says when it differs from the share currency.
 - **"available" is not trusted.** Yahoo answers a rate-limited fundamentals request with
@@ -543,8 +548,9 @@ argparse with subcommands (all print readable tables and save CSV/PNG to results
   `agents`, `probe`, `desk`) `main()` proves `results/` is writable by really creating a
   file there (`mkdir(exist_ok=True)` succeeds on a read-only folder), and for the three
   that call the API the LLM cache too, and exits with one `error:` line naming
-  `TRADINGLAB_HOME` otherwise, before any work or spend. `snapshot`, `download` and
-  `report` need neither; the price cache is best-effort everywhere.
+  `TRADINGLAB_HOME` otherwise, before any work or spend. `download` checks its cache
+  folder the same way, since the cache is its whole product. `snapshot` and `report` need
+  no writable folder; for them and for the backtests the price cache is best-effort.
 - `report` — load saved CSVs and print a combined summary.
 main() entry: `python -m tradinglab.cli <cmd>`, or the `tradinglab` console command.
 `--version` prints `tradinglab <version>`; the skill's setup check compares it.

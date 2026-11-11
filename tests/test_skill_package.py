@@ -402,7 +402,7 @@ def test_archive_member_order_does_not_depend_on_the_platform(tmp_path):
 
 
 @pytest.mark.parametrize("value", ["true", "No", "null", "~", "42", "1.5", "1e3", "2026-01-01",
-                                   "0b101", "5.", "1:30", "+0x1F", "="])
+                                   "0b101", "5.", "1:30", "+0x1F", "=", "<<", "1_", ".1_9"])
 def test_frontmatter_values_yaml_would_not_read_as_text_are_rejected(tmp_path, value):
     skill = _make_skill(tmp_path, frontmatter=f"---\nname: demo-skill\ndescription: {value}\n---\n",
                         body="")
@@ -416,3 +416,13 @@ def test_frontmatter_values_that_are_text_are_accepted(tmp_path, value):
     skill = _make_skill(tmp_path, frontmatter=f"---\nname: demo-skill\ndescription: {value}\n---\n",
                         body="")
     assert build_skill.validate(skill)
+
+
+@pytest.mark.parametrize("frontmatter", [
+    "---\nname:demo-skill\ndescription: x\n---\n",            # no space after the colon
+    "---\nname: demo-skill\ndescription: a\tb\n---\n",        # a tab inside a value
+])
+def test_frontmatter_lines_yaml_would_read_differently_are_rejected(tmp_path, frontmatter):
+    skill = _make_skill(tmp_path, frontmatter=frontmatter, body="")
+    with pytest.raises(ValueError, match="unsupported frontmatter line"):
+        build_skill.validate(skill)

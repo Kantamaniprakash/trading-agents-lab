@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import matplotlib
@@ -163,6 +165,9 @@ def _usage_table(usage: dict) -> pd.DataFrame:
 def cmd_download(args: argparse.Namespace) -> None:
     """Fetch/cache the universe and print row counts per ticker."""
     cfg = DataConfig(tickers=list(args.tickers), start=args.start, end=args.end)
+    # The cache is this command's whole product: refuse before downloading
+    # anything rather than download everything and save none of it.
+    _require_writable(cfg.cache_dir)
     prices = fetch_prices(
         cfg.tickers, cfg.start, cfg.end, cache_dir=cfg.cache_dir, force=args.force
     )
@@ -478,11 +483,13 @@ def _require_writable(directory: Path) -> None:
     ``mkdir(exist_ok=True)`` succeeds on a directory that exists but is
     read-only, so the only honest test is to write something.
     """
-    probe = directory / ".write-test"
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        probe.write_text("", encoding="utf-8")
-        probe.unlink()
+        # A name of its own, so two runs starting together cannot trip over
+        # each other's probe.
+        handle, name = tempfile.mkstemp(prefix=".write-test-", dir=directory)
+        os.close(handle)
+        os.unlink(name)
     except OSError as exc:
         _exit_unwritable(directory, exc)
 
@@ -874,8 +881,9 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     # Commands whose product is a file must be able to write it, and say so in
     # one line when they cannot, before doing any work or spending anything.
-    # The price cache is best-effort everywhere (fetch_prices warns), and
-    # "snapshot", "download" and "report" produce nothing else on disk.
+    # The price cache is best-effort for every command except "download",
+    # whose product it is and which checks it itself. "snapshot" and "report"
+    # write nothing else.
     if args.command in _WRITES_RESULTS:
         _require_writable(RESULTS_DIR)
     if args.command in _USES_LLM_CACHE:

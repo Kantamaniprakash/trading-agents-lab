@@ -37,7 +37,7 @@ _YAML_UNSAFE_START = tuple("!&*[]{}>|@`'\"%#,?-")
 # Plain scalars that YAML resolves to something other than a string.
 _YAML_NON_STRING = re.compile(
     r"(?i)(true|false|yes|no|on|off|null|~|y|n|=|<<"
-    r"|[-+]?(\d[\d_]*)?\.?\d+([eE][-+]?\d+)?"
+    r"|[-+]?(\d[\d_]*)?\.?\d+([eE][-+]?\d+)?|[-+]?\d[\d_]*|\.\d[\d_]*([eE][-+]?\d+)?"
     r"|[-+]?\d[\d_]*\.[\d_]*([eE][-+]?\d+)?"
     r"|[-+]?0b[01_]+|[-+]?0x[0-9a-f_]+|[-+]?0o?[0-7_]+"
     r"|[-+]?\d[\d_]*(:[0-5]?\d)+(\.[\d_]*)?"
@@ -52,9 +52,11 @@ _RELEASE_URL_RE = re.compile(
 def read_frontmatter(skill_md: Path) -> dict[str, str]:
     """Parse the flat ``key: value`` YAML frontmatter at the top of a SKILL.md.
 
-    Only single-line plain scalars are accepted, and anything a real YAML
-    parser would read differently is rejected, so this hand-rolled reader and
-    a marketplace's YAML library always agree on the values.
+    Only single-line plain scalars are accepted. The common forms a YAML
+    parser would read as something other than that text are rejected:
+    indicator characters, ``: `` and `` #`` inside a value, tabs, a key with
+    no space after its colon, and values YAML resolves to a boolean, null,
+    number or date. It is a guard against surprises, not a YAML validator.
     """
     lines = skill_md.read_text(encoding="utf-8").splitlines()
     if not lines or lines[0].strip() != "---":
@@ -64,9 +66,10 @@ def read_frontmatter(skill_md: Path) -> dict[str, str]:
         if line.strip() == "---":
             return fields
         key, sep, value = line.partition(":")
-        value = value.strip()
-        if not sep or not key.strip() or key[0].isspace():
+        if not sep or not key.strip() or key[0].isspace() or "\t" in line \
+                or (value and not value.startswith(" ")):
             raise ValueError(f"{skill_md}: unsupported frontmatter line: {line!r}")
+        value = value.strip()
         if not value:
             raise ValueError(f"{skill_md}: frontmatter key {key.strip()!r} has no value")
         if value.startswith(_YAML_UNSAFE_START) or ": " in value or " #" in value \

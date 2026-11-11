@@ -51,7 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were downloaded are still returned.
 - Commands that save results (`baselines`, `train-ml`, `agents`, `probe`, `desk`) check at
   start-up that the results folder is really writable and exit with one line naming
-  `TRADINGLAB_HOME` if it is not. `snapshot`, `download` and `report` no longer need it.
+  `TRADINGLAB_HOME` if it is not; `download` checks its cache folder the same way.
+  `snapshot` and `report` no longer need a writable folder at all.
 - The quarterly revenue and net income lines name the currency the company reports in
   when Yahoo provides it (`Quarterly revenue (USD, newest first)`).
 

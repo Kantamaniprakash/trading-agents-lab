@@ -230,6 +230,7 @@ def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
     meta_file = root / f"{ticker}_{start}_latest.meta.json"
 
     cached = _read_cached_prices(cache_file, meta_file)
+    fresh_enough = False
     if cached is not None:
         age = (now - cached.downloaded_at).total_seconds()
         traded = _last_trade_day(cached)
@@ -239,7 +240,8 @@ def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
         undecided = _last_bar_is_partial(ticker, cached.df.index[-1], cached)[0] is None
         # age < 0 is a download stamped in the future (clock changed, cache
         # copied between machines): its timestamp says nothing, so refresh.
-        if 0 <= age < _PRICE_REUSE_S and not behind and not undecided:
+        fresh_enough = 0 <= age < _PRICE_REUSE_S and not behind
+        if fresh_enough and not undecided:
             return cached
 
     for attempt in (1, 2):
@@ -255,6 +257,10 @@ def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
                 time.sleep(_RETRY_WAIT_S)
                 continue
             if cached is not None:
+                if fresh_enough:
+                    # Only a second look at an undecided bar failed. The
+                    # prices are minutes old: still undecided, not behind.
+                    return cached
                 return replace(cached, refresh_failed=True)
             raise
 
@@ -280,7 +286,8 @@ def _last_bar_is_partial(ticker: str, as_of: pd.Timestamp,
     Yahoo's calendar supplies it, including half-days, but it is not gospel:
     it has been seen an hour early for a venue, with trades still printing.
     The last-trade time from the same response is therefore used as a
-    cross-check (not for indices, whose closes are published late). Without a calendar, only plainly old bars and US-style
+    cross-check (a late stamp is ignored for indices, whose closes are
+    published about an hour after the bell). Without a calendar, only plainly old bars and US-style
     symbols are decided. Anything else is reported as unknown, never guessed
     as finished.
     """
@@ -299,14 +306,15 @@ def _last_bar_is_partial(ticker: str, as_of: pd.Timestamp,
         if downloaded < end + _SETTLE:
             return True, ""
         last = pd.Timestamp(session["last_trade"]) if session.get("last_trade") else None
-        if last is None or session.get("instrument_type") == "INDEX":
-            # Nothing to cross-check with, or an index, whose closing value
-            # Yahoo routinely publishes about an hour after the bell.
-            return False, ""
+        if last is None:
+            return False, ""  # nothing to cross-check with
         if last > end + _SETTLE:
-            # A trade stamped after the calendar's close. Far after: a print
-            # reported late (common in London), so the session is over.
-            if last > end + _MAX_CALENDAR_ERROR + _SETTLE:
+            # A stamp after the calendar's close. On an index it says nothing:
+            # Yahoo publishes index closes about an hour after the bell. (Cost:
+            # an index on a venue whose calendar is early is called a close.)
+            # Far after the close it is a print reported late, common in London.
+            if (session.get("instrument_type") == "INDEX"
+                    or last > end + _MAX_CALENDAR_ERROR + _SETTLE):
                 return False, ""
             # Within an hour: the calendar may be early and the session still
             # running. Still arriving means unknown; gone quiet means over.
@@ -315,8 +323,11 @@ def _last_bar_is_partial(ticker: str, as_of: pd.Timestamp,
             return False, ""
         if last >= end:
             # The closing print is in hand. Known limit: where the calendar is
-            # an hour early AND the feed is delayed, a delayed trade can land
-            # in this window and the bar is called final up to 15 minutes early.
+            # an hour early, a trade stamped in the 15 minutes after its close
+            # lands here and the bar is called final while the session still
+            # has most of an hour to run. With a delayed feed that lasts up to
+            # 15 minutes; for a thinly traded symbol, as long as its latest
+            # trade sits in that window.
             return False, ""
         # Last trade before the close: either a quiet stock or a delayed feed.
         return bool(downloaded < end + _SETTLE + _MAX_FEED_DELAY), ""
@@ -582,8 +593,8 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
     behind = False
     session = prices.session or {}
     currency = session.get("currency")
+    session_notes: list[str] = []
     if not historical:
-        session_notes: list[str] = []
         behind = prices.refresh_failed
         traded = _last_trade_day(prices)
         if traded is not None and traded > as_of.date():
@@ -635,6 +646,8 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
         # holiday or a halt. After a failed refresh the bar can also be old
         # simply because the download is, which the note above already says.
         age_then = (prices.downloaded_at.tz_convert(local_tz).date() - as_of.date()).days
+        if prices.downloaded_at > now:
+            age_then = 0  # a download stamped in the future dates nothing
         if age_then > _STALE_AFTER_DAYS:
             session_notes.append(
                 f"The newest available bar was {age_then} days old when it was "
@@ -648,12 +661,14 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
                 f"downloaded ({as_of:%Y-%m-%d}). That is normal during a long "
                 "exchange holiday; otherwise the symbol may be halted."
             )
-        if currency and currency != "USD" and not anonymize:
-            unit, major = _MINOR_UNITS.get(currency, ("", ""))
-            detail = f" ({unit}, 1/100 of {major})" if unit else ""
-            session_notes.append(f"Prices are quoted in {currency}{detail}.")
-        notes += session_notes
-        data_notes = session_notes + data_notes
+    # The currency describes the whole price table, so it is stated for past
+    # dates too, not only for the newest bar.
+    if currency and currency != "USD" and not anonymize:
+        unit, major = _MINOR_UNITS.get(currency, ("", ""))
+        detail = f" ({unit}, 1/100 of {major})" if unit else ""
+        session_notes.append(f"Prices are quoted in {currency}{detail}.")
+    notes += session_notes
+    data_notes = session_notes + data_notes
 
     snapshot = snapshot_from_history(
         df, as_of, ticker, lookback=lookback, anonymize=anonymize,

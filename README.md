@@ -182,8 +182,10 @@ The rule on this path is that a data problem is never analysed silently:
   Yahoo's calendar is cross-checked against its own last-trade time, because the calendar
   has been seen an hour early with trades still printing. When the answer cannot be
   established it is reported as unknown, not assumed to be a close. One limit is known:
-  where the calendar is an hour early and the quote feed is also delayed, a bar can be
-  called final up to 15 minutes too soon.
+  where Yahoo's calendar is an hour early, a bar can be called final while the session
+  still has most of an hour to run. That lasts up to 15 minutes when the quote feed is
+  delayed, and, for a thinly traded symbol, for as long as its latest trade sits in the
+  15 minutes after the calendar's close.
 - **Gaps are named.** An old bar (noted after 5 days, called stale after 12, which is
   longer than any scheduled exchange closure), a non-dollar price currency (pence and
   cents spelled out), statements reported in a different currency from the share price,
@@ -200,8 +202,9 @@ The rule on this path is that a data problem is never analysed silently:
   the price rebasing, so its prompts differed).
 - **`desk` will not spend API credit on bad data.** It exits before any LLM call when
   the snapshot is stale, prices are behind, or live data was asked for and none came
-  back; `--allow-degraded` overrides those. Every command that saves results (`desk`,
-  `agents`, `probe`, `baselines`, `train-ml`) first proves it can write them. It saves a transcript and a JSON record under
+  back; `--allow-degraded` overrides those. Every command that saves something (`desk`,
+  `agents`, `probe`, `baselines`, `train-ml`, and `download` for its cache) first proves
+  it can write it. It saves a transcript and a JSON record under
   `results/desk/`. A repeat is only free when prices, fundamentals and headlines all come
   back unchanged, which during market hours they never do.
 
@@ -357,7 +360,7 @@ Findings a 3-month backtest could never show:
 
 ## Verification
 
-- 293 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
+- 310 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
   future rows → assert all earlier features/indicators/engine outputs are bit-identical).
 - A five-dimension adversarial review pass (lookahead, statistics, costs, data hygiene,
   prompt leakage — every finding independently re-verified before acceptance) surfaced

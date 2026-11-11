@@ -986,20 +986,72 @@ def test_cli_snapshot_does_not_need_a_writable_results_directory(offline_cli, mo
     assert json.loads(capsys.readouterr().out)["as_of"] == as_of
 
 
-def test_cli_desk_refuses_when_results_exists_but_cannot_be_written(offline_cli, monkeypatch,
-                                                                    capsys):
-    """mkdir succeeds on a folder that exists but is read-only, so the probe
-    has to really create a file. A directory squatting on the probe's name
-    makes that write fail even for root."""
+def _unwritable(monkeypatch, *folders):
+    """Make creating a file fail in ``folders`` although they exist, which is
+    what a read-only mount does (and what chmod cannot do to root)."""
+    real = cli.tempfile.mkstemp
+    blocked = {str(folder) for folder in folders}
+
+    def mkstemp(*args, dir=None, **kwargs):
+        if str(dir) in blocked:
+            raise PermissionError(13, "Permission denied")
+        return real(*args, dir=dir, **kwargs)
+
+    monkeypatch.setattr(cli.tempfile, "mkstemp", mkstemp)
+
+
+@pytest.mark.parametrize("argv,folder", [
+    (["desk", "--ticker", "ABC", "--no-live"], "results"),
+    (["desk", "--ticker", "ABC", "--no-live"], "llm"),
+    (["agents", "--ticker", "ABC", "--start", "2026-01-05", "--end", "2026-02-27"], "llm"),
+    (["probe", "--ticker", "ABC", "--start", "2026-01-05", "--end", "2026-02-27"], "results"),
+    (["baselines", "--tickers", "ABC"], "results"),
+    (["train-ml", "--tickers", "ABC"], "results"),
+])
+def test_cli_refuses_when_a_folder_exists_but_cannot_be_written(offline_cli, monkeypatch, capsys,
+                                                                argv, folder):
+    """mkdir succeeds on a folder that exists but is read-only, so the check
+    has to really create a file. It runs before any download or API call."""
     tmp_path, _, _ = offline_cli
-    (tmp_path / "results" / "desk" / ".write-test").mkdir(parents=True)
+    (tmp_path / "results").mkdir()
     (tmp_path / "llm").mkdir()
+    _unwritable(monkeypatch, tmp_path / folder)
     _desk_must_not_run(monkeypatch)
+
+    def no_work(*_a, **_k):
+        raise AssertionError("work started before the folder was checked")
+
+    monkeypatch.setattr(cli, "fetch_prices", no_work)
     with pytest.raises(SystemExit) as exc:
-        cli.main(["desk", "--ticker", "ABC", "--no-live"])
+        cli.main(argv)
     assert exc.value.code == 1
     err = capsys.readouterr().err
-    assert "cannot write to" in err and "TRADINGLAB_HOME" in err
+    assert f"cannot write to {tmp_path / folder}" in err and "TRADINGLAB_HOME" in err
+    assert not list((tmp_path / folder).iterdir())  # no probe file left behind
+
+
+def test_cli_download_refuses_an_unwritable_cache_before_downloading(monkeypatch, tmp_path, capsys):
+    """The cache is download's whole product. It used to download every ticker,
+    save none, print "cached under" and exit 0."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where a directory is needed")
+    monkeypatch.setattr(cli, "DataConfig",
+                        lambda **kw: config_mod.DataConfig(cache_dir=blocker / "cache", **kw))
+
+    def no_work(*_a, **_k):
+        raise AssertionError("downloaded before the cache folder was checked")
+
+    monkeypatch.setattr(cli, "fetch_prices", no_work)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["download", "--tickers", "ABC"])
+    assert exc.value.code == 1
+    assert "cannot write to" in capsys.readouterr().err
+
+
+def test_write_probe_leaves_nothing_behind_and_is_private_to_the_run(tmp_path):
+    cli._require_writable(tmp_path / "new" / "folder")
+    assert (tmp_path / "new" / "folder").is_dir()
+    assert not list((tmp_path / "new" / "folder").iterdir())
 
 
 def test_cli_desk_json_runs_pipeline_once_and_saves_artifacts(offline_cli, monkeypatch, capsys):
@@ -1557,9 +1609,9 @@ def test_cli_desk_gate_does_not_block_runs_that_never_wanted_live_data(offline_c
     assert ran == [1]
 
 
-def test_cli_desk_proves_it_can_save_before_it_spends(offline_cli, monkeypatch, capsys):
-    """results/ existing but unwritable would lose a paid run to a traceback
-    after the money was spent."""
+def test_cli_desk_checks_the_llm_cache_before_it_spends(offline_cli, monkeypatch, capsys):
+    """The LLM cache folder cannot be created because a file sits where its
+    parent directory should be. That must stop the run before any API call."""
     tmp_path, _, _ = offline_cli
     blocker = tmp_path / "blocker"
     blocker.write_text("a file where a directory is needed")
@@ -1896,3 +1948,84 @@ def test_cli_snapshot_text_names_the_currency(offline_cli, monkeypatch, capsys,
     out = capsys.readouterr().out
     assert f"ticker: ABC ({name}, {kind}, {currency})" in out
     assert (f"note: Prices are quoted in {currency}." in out) is noted
+
+
+# ---------------------------------------------------------------------------
+# fourth review round
+# ---------------------------------------------------------------------------
+
+def test_index_keeps_the_delayed_feed_hold_and_only_ignores_late_stamps():
+    """An index close is published about an hour after the bell, so a late
+    stamp on an index means nothing. A value from BEFORE the close does: the
+    feed may be delayed and the close not in yet."""
+    df = _synthetic_df()
+
+    def index_state(last_trade, downloaded):
+        now = pd.Timestamp(f"{LAST_BAR} {downloaded}", tz="UTC")
+        session = _session(kind="INDEX", last_trade=f"{LAST_BAR}T{last_trade}+00:00")
+        return build_desk_snapshot("^GSPC", live=False, now=now,
+                                   prices=_prices(df, now, session)).partial_session
+
+    assert index_state("21:00:31", "21:20") is False      # late-published close
+    assert index_state("20:40:00", "21:00") is False      # stamped after close + settle
+    assert index_state("19:56:00", "20:16") is True       # value predates the close
+    assert index_state("19:56:00", "20:45") is False      # and nothing newer for 45 minutes
+
+
+def test_a_failed_second_look_does_not_mark_fresh_prices_as_behind(yahoo, tmp_path):
+    """An undecided download is fetched again inside the reuse window. If that
+    second look fails, the first is still minutes old: undecided, not behind,
+    and no reason to stop the desk."""
+    yahoo["session"] = _session(last_trade=f"{LAST_BAR}T20:55:00+00:00")
+    first_at = pd.Timestamp(f"{LAST_BAR} 21:30", tz="UTC")
+    first = fetch_latest_prices("ABC", cache_dir=tmp_path, now=first_at)
+    yahoo["fail"] = 2
+    again_at = first_at + pd.Timedelta(seconds=30)
+    again = fetch_latest_prices("ABC", cache_dir=tmp_path, now=again_at)
+    assert again.refresh_failed is False and again.downloaded_at == first.downloaded_at
+    desk = build_desk_snapshot("ABC", live=False, now=again_at, prices=again)
+    assert desk.prices_behind is False and desk.partial_session is None
+    # Outside the window the same failure is a real failed refresh.
+    yahoo["fail"] = 2
+    later = fetch_latest_prices("ABC", cache_dir=tmp_path, now=first_at + pd.Timedelta(minutes=20))
+    assert later.refresh_failed is True
+
+
+def test_price_currency_is_stated_for_past_dates_too():
+    """The currency describes the whole price table, not the newest session."""
+    df = _synthetic_df()
+    after = pd.Timestamp(f"{LAST_BAR} 17:30", tz="Europe/London")
+    london = _session(tz="Europe/London", end_utc=f"{LAST_BAR}T16:30:00+00:00", currency="GBp")
+    past = build_desk_snapshot("SHEL.L", date="2026-02-13", live=False, now=after,
+                               prices=_prices(df, after, london))
+    assert "Prices are quoted in GBp (pence, 1/100 of GBP)." in past.notes
+    assert past.snapshot.data_notes == ["Prices are quoted in GBp (pence, 1/100 of GBP)."]
+    assert past.partial_session is False and past.stale is False
+    masked = build_desk_snapshot("SHEL.L", date="2026-02-13", live=False, anonymize=True,
+                                 now=after, prices=_prices(df, after, london))
+    assert masked.snapshot.data_notes is None
+
+
+def test_a_future_stamped_download_dates_nothing():
+    """After a failed refresh on a download stamped ahead of the clock, the
+    bar's "age at download" would come out huge and blame a halt."""
+    df = _synthetic_df()
+    now = _ny("17:00") + pd.Timedelta(days=1)
+    desk = build_desk_snapshot(
+        "ABC", live=False, now=now,
+        prices=_prices(df, now + pd.Timedelta(days=10), _session(), refresh_failed=True))
+    assert not any("holiday" in n or "halted" in n for n in desk.notes)
+    assert any("downloaded at an unknown time" in n for n in desk.notes)
+
+
+def test_age_at_download_is_counted_on_the_exchange_calendar():
+    df = _synthetic_df()  # newest bar Friday the 13th
+    tokyo = _session(tz="Asia/Tokyo", end_utc="2026-03-19T06:30:00+00:00")
+    early = pd.Timestamp("2026-03-19 08:00", tz="Asia/Tokyo")   # the 19th in Tokyo, the 18th in UTC
+    desk = build_desk_snapshot("7203.T", live=False, now=early, prices=_prices(df, early, tokyo))
+    assert any("6 days old when it was downloaded" in n for n in desk.notes)
+    a_day_earlier = early - pd.Timedelta(days=1)
+    tokyo_18 = _session(tz="Asia/Tokyo", end_utc="2026-03-18T06:30:00+00:00")
+    fresh = build_desk_snapshot("7203.T", live=False, now=a_day_earlier,
+                                prices=_prices(df, a_day_earlier, tokyo_18))
+    assert not any("days old" in n for n in fresh.notes)
