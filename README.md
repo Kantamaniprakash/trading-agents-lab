@@ -219,29 +219,62 @@ The rule on this path is that a data problem is never analysed silently:
 ## Use it from your coding agent (skill)
 
 [`skill/trading-agents-desk/`](skill/trading-agents-desk/) packages the desk as an
-[agent skill](https://agentskills.io): a `SKILL.md` plus role briefs that Claude Code,
-Codex, Cursor and similar agents can load. The agent runs `snapshot` for the evidence and
-then plays the twelve roles itself, so **no Anthropic API key is needed** — the host
-agent's own model does the reasoning. Ask it to "analyze NVDA" and you get the simulated
-desk's sized BUY / SELL / HOLD view, the strongest argument on each side, and what would
-change it.
+[agent skill](https://agentskills.io), version 2.0.0: a `SKILL.md`, role briefs and four
+small Python scripts that Claude Code, Codex, Cursor and similar agents can load. Ask the
+agent to "analyze NVDA" and you get the simulated desk's sized BUY / SELL / HOLD view, the
+strongest argument on each side, and what would change it. **No API key is needed** (the host
+agent's own model does the reasoning) and **nothing is installed**: the scripts use the
+Python standard library only (3.9 or newer), and the skill no longer installs or imports this
+package.
+
+A run goes in this order:
+
+1. `get_data.py` downloads a year of daily prices, recent headlines and a few statement
+   figures from one host, `query1.finance.yahoo.com`. A price file works when there is no
+   network.
+2. `brief.py` checks the data, stops with a fixed sentence when it cannot be used, computes
+   the indicators with the same definitions as `tradinglab.features.indicators`, and prints a
+   fact sheet of named facts with every data problem as a flag and a note. When the source
+   has not published a finished session yet, the view ends at the last complete day and the
+   report says so in its first line.
+3. The agent plays the twelve roles from that sheet and writes a draft that names facts, such
+   as `{{rsi14}}`. It never types a market figure.
+4. `render.py` sends back a draft that holds a typed digit, inserts every figure from the
+   data, applies the desk's decision rules, and prints the report with a receipt. That
+   Markdown report is the answer.
+5. `page.py` can draw the same report as one self-contained HTML page: a header band, a
+   price chart with the levels, indicator meters, the two cases side by side and the
+   receipts. The agent runs it when its host can show or save an HTML file, or when asked.
 
 - **Claude Code:** copy the folder to `~/.claude/skills/trading-agents-desk/` (or
   `.claude/skills/` inside a project).
-- **Marketplaces:** `python skill/build_skill.py` writes `dist/trading-agents-desk.zip`;
-  listing copy and the upload checklist are in [`skill/LISTING.md`](skill/LISTING.md).
+- **Marketplaces:** `python skill/build_skill.py` stamps the scripts, lints the package and
+  writes `dist/trading-agents-desk.zip`; `python skill/build_skill.py --check` runs the same
+  checks and writes nothing. Listing copy and the upload checklist are in
+  [`skill/LISTING.md`](skill/LISTING.md).
+- **Design and file formats:** [`docs/skill-v2/DESIGN.md`](docs/skill-v2/DESIGN.md) and
+  [`docs/skill-v2/CONTRACTS.md`](docs/skill-v2/CONTRACTS.md).
 
-The skill installs this package from a pinned release tag into its own virtual
-environment (`~/.tradinglab/venv`), so the tag named in `SKILL.md` must exist before the
-skill is shared. The build refuses to write the ZIP until it does.
+Each script carries a hash of its own text. `brief.py`, `render.py` and `page.py` refuse to
+run when the two disagree, and a preflight checks every script file the run uses, so run
+`python skill/build_skill.py` again after editing a script: it stamps the hashes and the
+known answers. A test fails while a stamp is stale, and no formatter may touch the scripts
+(they are excluded from `ruff format` and from the pre-commit hooks for that reason).
+CI runs the scripts on Linux, macOS and Windows with Python 3.9 and 3.13, and a nightly
+workflow asks the live data source for three symbols and fails only when the answer's format
+has changed.
 
-Two limits are deliberate, and the skill states both to the user:
+Three limits are deliberate, and the skill states them to the user:
 
-- **That mode has never been backtested.** An agent that runs the roles itself knows
-  which ticker and date it asked for, so it cannot be anonymized, and it is only sound on
-  the current date. The skill sends historical evaluation through `agents --anonymize`
-  and `probe` instead. The one published result (−0.9% against +15.7% for buy-and-hold)
-  comes from a reduced, price-only run through the API.
+- **The design lost its only test, and the skill has never been backtested.** An agent that
+  runs the roles itself knows which ticker and date it asked for, so it cannot be anonymized,
+  and it is only sound on the current date. Historical evaluation belongs to
+  `agents --anonymize` and `probe` in this package. The one published result (−0.9% against
+  +15.7% for buy-and-hold) comes from a reduced, price-only run through the API, and every
+  report prints it.
+- **The receipt covers sourcing and arithmetic, not judgment.** Every figure on the report is
+  inserted by code from the downloaded data. Whether the sentence around it is right, and
+  whether the desk's view is any good, is not checked.
 - **It takes no personal inputs.** The desk is a simulation that starts from no position.
   It does not ask for holdings, and it never trades.
 

@@ -1,9 +1,15 @@
+# The skill's shipped scripts carry a hash of their own text and a size cap, and
+# skill/build_skill.py is the only tool that writes them. A hook that rewrites one (the
+# formatter would re-indent all four) makes it fail its own integrity check, so the hooks
+# that can rewrite a file leave that folder alone. `ruff check skill` still reads it.
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+        exclude: ^skill/trading-agents-desk/scripts/
       - id: end-of-file-fixer
+        exclude: ^skill/trading-agents-desk/scripts/
       - id: check-yaml
       - id: check-added-large-files
         args: ["--maxkb=1024"]
@@ -14,4 +20,6 @@ repos:
     hooks:
       - id: ruff
         args: ["--fix"]
+        exclude: ^skill/trading-agents-desk/scripts/
       - id: ruff-format
+        exclude: ^skill/trading-agents-desk/scripts/

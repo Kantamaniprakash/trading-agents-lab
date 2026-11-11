@@ -38,8 +38,8 @@ trading-agents-lab/
 │   └── desk/                    # one-shot `desk` runs: transcript + JSON (git-ignored)
 ├── scripts/make_figures.py      # regenerates the README figures from results + cache
 ├── skill/
-│   ├── trading-agents-desk/     # agent skill: SKILL.md + references/ (text only)
-│   ├── build_skill.py           # validates the skill and writes dist/<name>.zip
+│   ├── trading-agents-desk/     # agent skill 2.0: SKILL.md + references/ + four stdlib scripts
+│   ├── build_skill.py           # stamps, lints and packages the skill: dist/<name>.zip
 │   └── LISTING.md               # marketplace listing copy + upload checklist
 ├── src/tradinglab/
 │   ├── __init__.py
@@ -50,7 +50,8 @@ trading-agents-lab/
 │   ├── backtest/{__init__,metrics,engine,baselines}.py
 │   ├── agents/{__init__,llm,state,prompts,roles,graph,desk,probe}.py
 │   └── cli.py
-└── tests/test_{indicators,metrics,engine,dataset,agents_backtest,probe,desk,skill_package}.py
+├── tests/test_{indicators,metrics,engine,dataset,agents_backtest,probe,desk,skill_package}.py
+└── tests/skill_v2/              # the skill's four scripts and its text (docs/skill-v2/)
 ```
 
 ## 3. Shared conventions (every module MUST follow these)
@@ -593,7 +594,8 @@ argparse with subcommands (all print readable tables and save CSV/PNG to results
   no writable folder; for them and for the backtests the price cache is best-effort.
 - `report` — load saved CSVs and print a combined summary.
 main() entry: `python -m tradinglab.cli <cmd>`, or the `tradinglab` console command.
-`--version` prints `tradinglab <version>`; the skill's setup check compares it.
+`--version` prints `tradinglab <version>`. (The agent skill no longer installs or calls this
+package: since version 2.0 it ships its own standard-library scripts, see `docs/skill-v2/`.)
 
 ## 6. Tests (pytest; `pythonpath = ["src"]` configured in pyproject)
 
@@ -626,11 +628,15 @@ main() entry: `python -m tradinglab.cli <cmd>`, or the `tradinglab` console comm
   cache, 15-minute reuse, retry, fallback, sidecar); late closes (each fill condition,
   the sidecar record, reuse, and the unchanged backtest path); `snapshot` / `desk` CLI output,
   encoding safety, artifacts and the spend gate, with the pipeline stubbed.
-- **test_skill_package.py**: skill frontmatter and packaging rules; every `tradinglab ...`
-  line in the skill's docs is parsed with the real argparse parser, so renaming a
-  subcommand or flag fails a test instead of a user's terminal; the install URL is pinned
-  to the release tag that matches the package version; the skill's text keeps its
-  promises (disclosure, no trading, no personal inputs).
+- **test_skill_package.py**: the version 2 skill package and its build tool: package
+  contents, frontmatter, the lint (grammar, imports, file access, readable source, sizes,
+  fail patterns), fresh integrity stamps and known answers, the deterministic ZIP, and
+  guards on the listing copy and the workflows.
+- **tests/skill_v2/**: the skill's four scripts and its text, on generated numbers:
+  indicator parity with `tradinglab.features.indicators`, the data source's row shapes,
+  every error code of the renderer, the page, the whole chain end to end, and
+  `test_portable.py`, the same chain with the standard library only. The skill's text
+  keeps its promises (disclosure, no trading, no personal inputs).
 - Tests must not hit the network — construct synthetic DataFrames (seeded RNG, ~400 rows,
   business-day index).
 
