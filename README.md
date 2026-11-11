@@ -173,7 +173,7 @@ python -m tradinglab.cli desk --ticker NVDA
 The rule on this path is that a data problem is never analysed silently:
 
 - **Prices are downloaded fresh** on every snapshot (a download under 15 minutes old is
-  reused, unless it is already known to be missing the newest session). If Yahoo returns
+  reused, unless it is already known to be missing a session). If Yahoo returns
   nothing, the previous download is shown and flagged `prices_behind`. Desk downloads
   live in their own cache folder, so an intraday bar can never reach a backtest through
   a shared price file.
@@ -194,6 +194,15 @@ The rule on this path is that a data problem is never analysed silently:
   session, and not around a dividend; in those cases, and whenever a check
   fails, the snapshot is flagged `prices_behind` instead. The close Yahoo publishes
   later can differ slightly from the filled one. Backtests never see a filled bar.
+- **A session missing behind today's bar ends the view before it.** For about half an
+  hour after the London and Frankfurt open, Yahoo's row for the session that closed the
+  evening before can be empty while today's row already has values. Left alone, the
+  one-day change and every indicator would be measured across the missing day. The desk
+  then leaves the unfinished bar out, ends the snapshot at the last complete session,
+  flags it `prices_behind` and names the missing date in a note; fetching again a little
+  later clears it. If an earlier run had already filled that session's close, its bar is
+  put back instead and nothing is missing. This is looked for only while the newest bar
+  is unfinished, and not for crypto, currencies or futures.
 - **Gaps are named.** An old bar (noted after 5 days, called stale after 12, which is
   longer than any scheduled exchange closure), a non-dollar price currency (pence and
   cents spelled out), statements reported in a different currency from the share price,
@@ -368,7 +377,7 @@ Findings a 3-month backtest could never show:
 
 ## Verification
 
-- 373 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
+- 418 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
   future rows → assert all earlier features/indicators/engine outputs are bit-identical).
 - A five-dimension adversarial review pass (lookahead, statistics, costs, data hygiene,
   prompt leakage — every finding independently re-verified before acceptance) surfaced

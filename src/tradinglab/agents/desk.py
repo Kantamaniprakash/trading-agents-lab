@@ -65,6 +65,11 @@ _MAX_CALENDAR_ERROR = pd.Timedelta(hours=1)
 # is rounding. Further out it is not that day's close.
 _RANGE_TOLERANCE = 1e-4
 _BAR_COLUMNS = ("open", "high", "low", "close", "volume")
+# Instrument types that are not checked for a session missing behind the bar
+# in progress. For currencies and futures Yahoo lists a holiday as an empty
+# daily row, so a row without a bar is no proof that a session was lost. A
+# cryptocurrency is left out as it is from the late-close fill.
+_NO_GAP_CHECK = frozenset({"CURRENCY", "FUTURE", "CRYPTOCURRENCY"})
 # Quote currencies that are a hundredth of the currency people mean.
 _MINOR_UNITS = {"GBp": ("pence", "GBP"), "GBX": ("pence", "GBP"),
                 "ZAc": ("cents", "ZAR"), "ILA": ("agorot", "ILS")}
@@ -115,10 +120,17 @@ class LatestPrices:
     # True when only the second look at an undecided bar failed and ``df`` is
     # the first look, minutes old: not behind, but the caller must be told.
     recheck_failed: bool = False
-    # Set when Yahoo's daily row for the newest session had no close yet and
+    # Set when Yahoo's daily row for a finished session had no close yet and
     # the last regular-market price was used instead: that bar, as {"date",
-    # "open", "high", "low", "close", "volume"}. ``df`` already ends with it.
+    # "open", "high", "low", "close", "volume"}. ``df`` already holds it, as
+    # its newest bar or, when a later download carried the fill over, just
+    # before the bar of the session in progress.
     late_close: dict | None = None
+    # Set when Yahoo lists a session between the last two usable bars, the
+    # newer of them unfinished, and sent no usable bar for it: {"missing":
+    # ["YYYY-MM-DD", ...], "left_out": "YYYY-MM-DD"}. ``df`` then ends at the
+    # last complete session; the unfinished bar (``left_out``) is not in it.
+    gap: dict | None = None
 
 
 def _fetch_session_info(ticker: str) -> dict | None:
@@ -167,9 +179,11 @@ def _fetch_raw_tail(ticker: str, since: pd.Timestamp) -> pd.DataFrame | None:
 
     The normal download adjusts prices by the ratio of adjusted close to
     close, so a row without a close leaves it with no open, high or low
-    either. This is the only way to see what Yahoo did send for that row.
-    Costs one request, made only when the newest session is missing. Returns
-    None on any failure.
+    either, and the price loader then drops the row. This is the only way to
+    see which sessions Yahoo lists and what it did send for them. Costs one
+    request, and a download makes at most one: when the newest session is
+    missing, or when a session may be missing behind an unfinished one.
+    Returns None on any failure.
     """
     try:
         import yfinance as yf
@@ -208,16 +222,20 @@ def _read_cached_prices(cache_file: Path, meta_file: Path) -> LatestPrices | Non
             raise ValueError("sidecar belongs to a different download")
         downloaded_at = _utc(pd.Timestamp(meta["downloaded_at"]))
         session = meta.get("session") if isinstance(meta.get("session"), dict) else None
-        # Sidecars written before late closes were filled have no such field.
+        # Sidecars written before late closes were filled, or before missing
+        # sessions were looked for, have no such fields.
         late_close = meta.get("late_close")
-        filled = df if late_close is None else _with_late_close(df, late_close)
+        gap = meta.get("gap")
+        usable = df if late_close is None else _with_late_close(df, late_close)
+        if gap is not None:
+            usable = _before_gap(usable, gap)
     except Exception:
         # No usable sidecar: the file's own timestamp is the best record there is.
         downloaded_at = pd.Timestamp(cache_file.stat().st_mtime, unit="s", tz="UTC")
-        session = late_close = None
-        filled = df
-    return LatestPrices(df=filled, downloaded_at=downloaded_at, session=session,
-                        late_close=late_close)
+        session = late_close = gap = None
+        usable = df
+    return LatestPrices(df=usable, downloaded_at=downloaded_at, session=session,
+                        late_close=late_close, gap=gap)
 
 
 def _fingerprint(df: pd.DataFrame) -> list:
@@ -232,12 +250,15 @@ def _fingerprint(df: pd.DataFrame) -> list:
 
 
 def _write_sidecar(meta_file: Path, df: pd.DataFrame, downloaded_at: pd.Timestamp,
-                   session: dict | None, late_close: dict | None = None) -> None:
+                   session: dict | None, late_close: dict | None = None,
+                   gap: dict | None = None) -> None:
     """Record when ``df`` was downloaded and the exchange facts that came with it.
 
     ``df`` is the frame as it sits in the price file. A late-close bar is
     kept here and never written into that file, so prices cannot hold a
-    filled close without the record that says so.
+    filled close without the record that says so. A missing session is
+    recorded here too, and the price file keeps the unfinished bar the view
+    leaves out: the file stays exactly what Yahoo delivered.
 
     Written through a temporary file so a reader never sees half a document.
     The cache is a convenience: if it cannot be written the sidecar is removed
@@ -248,6 +269,7 @@ def _write_sidecar(meta_file: Path, df: pd.DataFrame, downloaded_at: pd.Timestam
         "fingerprint": _fingerprint(df),
         "session": session,
         "late_close": late_close,
+        "gap": gap,
     }
     tmp = meta_file.with_name(meta_file.name + ".tmp")
     try:
@@ -280,6 +302,13 @@ def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
     When Yahoo's daily row for the newest, finished session has no close yet,
     the bar is completed with Yahoo's last regular-market price (see
     ``_late_close_bar``) and returned in ``late_close`` so the caller says so.
+
+    When the newest usable bar is an unfinished session and Yahoo lists a
+    session just behind it that it sent no usable bar for (see
+    ``_gap_behind_open_session``), the frame is cut back to the last complete
+    session and the missing dates are returned in ``gap``, unless an earlier
+    download filled that very session, in which case its bar is put back.
+    Either way Yahoo's unadjusted rows are read at most once per download.
     """
     now = _utc(now)
     start = DataConfig().start
@@ -292,7 +321,8 @@ def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
     if cached is not None:
         age = (now - cached.downloaded_at).total_seconds()
         traded = _last_trade_day(cached)
-        behind = traded is not None and traded > cached.df.index[-1].date()
+        behind = cached.gap is not None or (
+            traded is not None and traded > cached.df.index[-1].date())
         # A download whose session state could not be decided is not reused
         # either: a second look is exactly what settles it.
         undecided = _last_bar_is_partial(ticker, cached.df.index[-1], cached)[0] is None
@@ -326,12 +356,25 @@ def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
     # request below cannot leave them paired with the previous run's sidecar.
     _write_sidecar(meta_file, df, now, None)
     session = _fetch_session_info(ticker)
-    late_close = _late_close_bar(ticker, df, session, now)
+    late_close = gap = None
+    probe = LatestPrices(df=df, downloaded_at=now, session=session)
+    # Yahoo's unadjusted rows are read at most once per download. The newest
+    # usable bar is either a session in progress, which can hide a missing
+    # session behind it, or it is not, and then the newest session may only
+    # lack its close. (``_late_close_bar`` refuses whenever that bar is
+    # unfinished, so nothing is lost by not asking it.)
+    if session is not None and _last_bar_is_partial(ticker, df.index[-1], probe)[0] is True:
+        late_close, gap = _gap_behind_open_session(ticker, df, session, now, cached)
+    else:
+        late_close = _late_close_bar(ticker, df, session, now)
     if session is not None:
-        _write_sidecar(meta_file, df, now, session, late_close)
+        _write_sidecar(meta_file, df, now, session, late_close, gap)
     if late_close is not None:
         df = _with_late_close(df, late_close)
-    return LatestPrices(df=df, downloaded_at=now, session=session, late_close=late_close)
+    if gap is not None:
+        df = _before_gap(df, gap)
+    return LatestPrices(df=df, downloaded_at=now, session=session, late_close=late_close,
+                        gap=gap)
 
 
 def _late_close_bar(ticker: str, df: pd.DataFrame, session: dict | None,
@@ -385,29 +428,147 @@ def _late_close_bar(ticker: str, df: pd.DataFrame, session: dict | None,
         return None
     if not pd.isna(bar["close"]):
         return None
-    # yfinance writes a missing volume as 0, so a zero counts as missing.
-    rest = [float(bar[column]) for column in ("open", "high", "low", "volume")]
-    if not all(math.isfinite(value) and value > 0 for value in rest):
-        return None
-    low, high = float(bar["low"]), float(bar["high"])
-    if not low * (1 - _RANGE_TOLERANCE) <= price <= high * (1 + _RANGE_TOLERANCE):
-        return None
-    return {"date": f"{day:%Y-%m-%d}", "open": float(bar["open"]), "high": high,
-            "low": low, "close": float(price), "volume": float(bar["volume"])}
+    filled = {"date": f"{day:%Y-%m-%d}", "open": float(bar["open"]),
+              "high": float(bar["high"]), "low": float(bar["low"]), "close": float(price),
+              "volume": float(bar["volume"])}
+    return filled if _is_whole_bar(filled) else None
+
+
+def _is_whole_bar(bar: dict) -> bool:
+    """Positive open, high, low, close and volume, with the close in the day's range.
+
+    yfinance writes a missing volume as 0, so a zero counts as missing. A
+    close up to ``_RANGE_TOLERANCE`` outside low-to-high is rounding.
+    """
+    try:
+        values = {column: float(bar[column]) for column in _BAR_COLUMNS}
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not all(math.isfinite(value) and value > 0 for value in values.values()):
+        return False
+    return (values["low"] * (1 - _RANGE_TOLERANCE) <= values["close"]
+            <= values["high"] * (1 + _RANGE_TOLERANCE))
 
 
 def _with_late_close(df: pd.DataFrame, bar: dict) -> pd.DataFrame:
-    """``df`` with a late-close bar appended; raises when the record does not fit."""
+    """``df`` with a late-close bar put in at its date; raises when the record does not fit.
+
+    The bar goes after the newest bar (the session Yahoo has not closed yet)
+    or between the last two (a fill carried over into the next session).
+    """
     day = pd.Timestamp(bar["date"])
     values = {column: float(bar[column]) for column in _BAR_COLUMNS}
-    if day <= df.index[-1] or not all(math.isfinite(value) for value in values.values()):
+    newest = day > df.index[-1]
+    carried = len(df) > 1 and df.index[-2] < day < df.index[-1]
+    if not (newest or carried) or not all(math.isfinite(value) for value in values.values()):
         raise ValueError("late-close record does not fit these prices")
     index = pd.DatetimeIndex([day], name=df.index.name).astype(df.index.dtype)
     row = pd.DataFrame(values, index=index)[list(df.columns)]
     # yfinance names the column axis and the price table prints that name;
     # a row without it would make concat drop it.
     row.columns = df.columns
-    return pd.concat([df, row.astype(df.dtypes.to_dict())])
+    row = row.astype(df.dtypes.to_dict())
+    return pd.concat([df, row] if newest else [df.iloc[:-1], row, df.iloc[-1:]])
+
+
+def _gap_behind_open_session(ticker: str, df: pd.DataFrame, session: dict,
+                             downloaded_at: pd.Timestamp, earlier: LatestPrices | None,
+                             ) -> tuple[dict | None, dict | None]:
+    """A session Yahoo lists just behind the unfinished newest bar but sent no bar for.
+
+    Seen on London and Frankfurt shares for about half an hour after the
+    open: the row of the session that finished the evening before is empty
+    while the session in progress already has values. The price loader drops
+    the empty row, so the frame runs from the session before straight to the
+    unfinished bar, and the one-day change and every indicator are computed
+    across a day that is not there.
+
+    Called only when the newest usable bar is an unfinished session. Yahoo's
+    unadjusted rows are asked for (one request) only when a calendar day lies
+    between the last two usable bars: no session can hide between two
+    consecutive days. Returns ``(late_close, gap)``, at most one of them set.
+    ``gap`` names every date Yahoo lists strictly between the two bars,
+    whatever its row holds: each is a session these prices do not have. A
+    holiday is not listed for a share, a fund or an index, so it is not
+    reported; where Yahoo does list holidays (``_NO_GAP_CHECK``) nothing is
+    looked for. ``late_close`` is the bar an earlier download filled for that
+    one date (``_carried_fill``), which closes the gap instead of reporting
+    it. ``(None, None)`` when nothing is missing or Yahoo could not be read.
+    """
+    if session.get("instrument_type") in _NO_GAP_CHECK or len(df) < 2:
+        return None, None
+    before, newest = df.index[-2].normalize(), df.index[-1].normalize()
+    if (newest - before).days < 2:
+        return None, None
+    tail = _fetch_raw_tail(ticker, before)
+    if tail is None:
+        return None, None
+    listed = tail.index[(tail.index > before) & (tail.index < newest)].unique()
+    if listed.empty:
+        return None, None
+    carried = _carried_fill(ticker, df, tail, listed, session, downloaded_at, earlier)
+    if carried is not None:
+        return carried, None
+    return None, {"missing": [f"{day:%Y-%m-%d}" for day in listed],
+                  "left_out": f"{newest:%Y-%m-%d}"}
+
+
+def _carried_fill(ticker: str, df: pd.DataFrame, tail: pd.DataFrame,
+                  listed: pd.DatetimeIndex, session: dict, downloaded_at: pd.Timestamp,
+                  earlier: LatestPrices | None) -> dict | None:
+    """The bar an earlier download filled, when it is the one session missing here.
+
+    Before the open the desk may have completed yesterday's bar from the last
+    regular-market price (``_late_close_bar``). Once the next session trades,
+    that price is today's and Yahoo's row for yesterday can be empty, so the
+    bar cannot be built again: the record in the earlier sidecar is the only
+    copy. It is put back under the guards the fill itself uses, read for a
+    bar that is no longer the newest: the record is for the single date Yahoo
+    lists between the last two usable bars; it is a whole bar with its close
+    in its own range; that session is over; Yahoo still has no close for it
+    (a close Yahoo has is the one to show, and a fresh download brings it);
+    the usable bar before it reads the same adjusted and unadjusted; and that
+    bar is the one the record followed, unchanged since, so nothing was
+    restated in between. Otherwise None, and the gap is reported.
+    """
+    record = earlier.late_close if earlier is not None else None
+    if not record or len(listed) != 1:
+        return None
+    day = listed[0]
+    if record.get("date") != f"{day:%Y-%m-%d}" or not _is_whole_bar(record):
+        return None
+    probe = LatestPrices(df=df, downloaded_at=downloaded_at, session=session)
+    if _last_bar_is_partial(ticker, day, probe)[0] is not False:
+        return None
+    before, close_before = df.index[-2], float(df["close"].iloc[-2])
+    row, row_before = tail[tail.index == day], tail[tail.index == before.normalize()]
+    if len(row) != 1 or not pd.isna(row["close"].iloc[0]):
+        return None
+    # The record is unadjusted, like the row it was built from. It belongs in
+    # this adjusted series only if the bar before it reads the same in both.
+    if len(row_before) != 1 or not math.isclose(row_before["close"].iloc[0], close_before,
+                                                rel_tol=1e-6):
+        return None
+    # A split restates adjusted and unadjusted closes together, which the
+    # check above cannot see. The earlier download can: it holds the bar the
+    # record followed as it read when the record was made.
+    held = earlier.df
+    at = held.index.get_indexer([day])[0]
+    if at < 1 or held.index[at - 1] != before or not math.isclose(
+            float(held["close"].iloc[at - 1]), close_before, rel_tol=1e-6):
+        return None
+    return {"date": f"{day:%Y-%m-%d}",
+            **{column: float(record[column]) for column in _BAR_COLUMNS}}
+
+
+def _before_gap(df: pd.DataFrame, gap: dict) -> pd.DataFrame:
+    """``df`` cut back to the last complete session; raises when the record does not fit."""
+    left_out = pd.Timestamp(gap["left_out"])
+    missing = [pd.Timestamp(day) for day in gap["missing"]]
+    if (len(df) < 2 or df.index[-1].normalize() != left_out or not missing
+            or not all(df.index[-2].normalize() < day < left_out for day in missing)):
+        raise ValueError("gap record does not fit these prices")
+    return df.iloc[:-1]
 
 
 def _last_bar_is_partial(ticker: str, as_of: pd.Timestamp,
@@ -564,7 +725,9 @@ class DeskSnapshot:
     partial_session: bool | None = False
     stale: bool = False          # newest bar is older than a long weekend
     # Newer prices than these may exist: the download failed and an earlier
-    # one is shown, or Yahoo's bar for the latest session was unusable.
+    # one is shown, Yahoo's bar for the latest session was unusable, or a
+    # session just behind the one in progress had no usable bar and the view
+    # ends at the last complete session.
     prices_behind: bool = False
     fundamentals_missing: list[str] = field(default_factory=list)
     # Everything a caller should know. The subset that changes how the data
@@ -603,9 +766,9 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
     masking. Each skipped, failed or incomplete input is recorded in ``notes``
     rather than silently dropped, and the notes that change how the data must
     be read (unfinished session, stale bar, prices that could not be
-    refreshed, a close taken from the last regular-market price, incomplete
-    fundamentals) are also written into the snapshot itself so the agents
-    see them.
+    refreshed, a session with no usable bar, a close taken from the last
+    regular-market price, incomplete fundamentals) are also written into the
+    snapshot itself so the agents see them.
 
     ``prices`` (a finished download), ``df`` (a bare price frame, treated as
     downloaded at ``now``) and ``now`` exist for tests; by default prices are
@@ -732,19 +895,36 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
     session = prices.session or {}
     currency = session.get("currency")
     session_notes: list[str] = []
+    late = prices.late_close
+    filled_day = pd.Timestamp(late.get("date")) if late else pd.NaT
+    # Said wherever the filled bar is in view. It is the newest bar, or, once
+    # carried over into the next session, the one before it, which a past
+    # date can then land on. (No record compares as not in view.)
+    if filled_day <= as_of:
+        # A masked snapshot must not carry a real price level.
+        shown = "" if anonymize else f" ({float(late['close']):.10g})"
+        session_notes.append(
+            f"The close for {filled_day:%Y-%m-%d} is Yahoo's last regular-market "
+            f"price{shown}, because Yahoo's daily bar for that session had no "
+            "close yet. The close Yahoo publishes later may differ slightly."
+        )
     if not historical:
         behind = prices.refresh_failed
-        late = prices.late_close
-        if late and late.get("date") == f"{as_of:%Y-%m-%d}":
-            # A masked snapshot must not carry a real price level.
-            shown = "" if anonymize else f" ({float(late['close']):.10g})"
-            session_notes.append(
-                f"The close for {as_of:%Y-%m-%d} is Yahoo's last regular-market "
-                f"price{shown}, because Yahoo's daily bar for that session had no "
-                "close yet. The close Yahoo publishes later may differ slightly."
-            )
+        gap = prices.gap
         traded = _last_trade_day(prices)
-        if traded is not None and traded > as_of.date():
+        if gap:
+            # The frame already ends at the last complete session. Yahoo did
+            # send a bar for the session it reports trading on, so the note
+            # below would name the wrong day.
+            behind = True
+            session_notes.append(
+                f"Yahoo returned no usable bar for {', '.join(gap['missing'])}, between "
+                f"the last complete session ({as_of:%Y-%m-%d}) and the session in "
+                f"progress ({gap['left_out']}). A change measured across that gap "
+                "would be wrong, so the unfinished bar is left out and this snapshot "
+                f"ends at {as_of:%Y-%m-%d}. Prices are at least one session behind."
+            )
+        elif traded is not None and traded > as_of.date():
             # Yahoo sometimes returns the newest row with volume but no prices;
             # the price loader drops such rows, which must not pass unremarked.
             behind = True

@@ -430,7 +430,7 @@ def run_agent_backtest(df, ticker, start, end, client, cfg, out_dir=None, every=
 ```python
 @dataclass
 class LatestPrices: df, downloaded_at (UTC), session: dict | None, refresh_failed: bool,
-                    late_close: dict | None
+                    late_close: dict | None, gap: dict | None
 def fetch_latest_prices(ticker, cache_dir=None, now=None) -> LatestPrices
 def build_desk_snapshot(ticker, date=None, live=True, anonymize=False, lookback=60,
                         df=None, prices=None, now=None) -> DeskSnapshot
@@ -446,9 +446,9 @@ def render_decision_card(log, desk) -> str
   roles itself) and the `desk` command.
 - **Governing rule: a data problem is never analysed silently.** Every gap, fallback and
   uncertainty adds a line to `notes`. The ones that change how the data must be read
-  (unfinished session, unknown session state, old or stale bar, prices behind, a close
-  taken from the last regular-market price, a non-dollar currency, incomplete
-  fundamentals) are also copied into
+  (unfinished session, unknown session state, old or stale bar, prices behind, a session
+  with no usable bar, a close taken from the last regular-market price, a non-dollar
+  currency, incomplete fundamentals) are also copied into
   `MarketSnapshot.data_notes` and rendered at the top
   of the context block, so the agents are told as well as the caller. Advice aimed at the
   caller ("re-run in a minute") stays out of the prompt. With no such notes the rendered
@@ -456,8 +456,9 @@ def render_decision_card(log, desk) -> str
   and published transcripts stay reproducible.
 - **Prices are never trusted from an old file.** `fetch_latest_prices` downloads on every
   call unless the previous download is younger than `_PRICE_REUSE_S` (15 min) and is not
-  already known to be missing the newest session (otherwise the documented "wait and
-  fetch again" could never clear the flag). A download stamped in the future is not
+  already known to be missing the newest session, or one behind an unfinished bar
+  (otherwise the documented "wait and fetch again" could never clear the flag). A download
+  stamped in the future is not
   reused either. An empty answer (Yahoo's response to rate limiting) is retried once
   after `_RETRY_WAIT_S`, except when Yahoo says the symbol does not exist; if it is still
   empty and an earlier download is on disk, that is returned with `refresh_failed=True`
@@ -466,7 +467,8 @@ def render_decision_card(log, desk) -> str
   backtest through a shared file.
 - **The sidecar must describe its price file.** `*.meta.json` records the download time,
   a fingerprint of the frame (row count, newest bar's date, close and volume), the
-  exchange facts and, when there is one, the late-close bar. It is written (atomically)
+  exchange facts and, when there is one, the late-close bar or the record of a missing
+  session. It is written (atomically)
   right after the download and again once the
   metadata request returns, and a sidecar whose fingerprint does not match the parquet is
   ignored, so neither an interrupted run nor a failed cache write can leave prices judged
@@ -531,6 +533,80 @@ def render_decision_card(log, desk) -> str
   only once Yahoo has restated its history, as for a bar Yahoo delivers complete; and a
   day Yahoo leaves out of its answer altogether, unlike one it sends empty, cannot be
   told from a holiday.
+- **A session missing behind the one in progress ends the view before it.** Sampled on
+  SHEL.L and SAP.DE on 2026-11-11: for about half an hour after the open (08:24 and 08:34
+  UTC) Yahoo's row for the session that had closed the evening before was empty while the
+  row of the session in progress had values; from 08:44 it was complete. The loader drops
+  the empty row, so the frame ran from the 9th straight to the unfinished 11th, the last
+  trade day equalled the newest bar, and nothing was said: the one-day change and every
+  indicator were computed across a day that was not there. `_gap_behind_open_session`
+  (called by `fetch_latest_prices` only, and only when `_last_bar_is_partial` says `True`
+  for the newest usable bar) reads Yahoo's unadjusted rows from the bar before it
+  (`_fetch_raw_tail`) and takes every date listed strictly between the last two usable
+  bars as a session these prices do not have, whatever its row holds (nothing, no close,
+  or a whole bar that Yahoo completed between the two requests).
+  - *Decision: the unfinished bar is dropped as well.* `LatestPrices.df` is cut back to
+    the last complete session and `gap` records `{"missing": [dates], "left_out": date of
+    the unfinished bar}`. Keeping the bar would leave a table whose last two rows read as
+    consecutive sessions, and a note cannot repair that: the 1-day return, the true range
+    and every moving figure in the block would still be measured across the hole.
+    Ending at the last complete session gives a view that is right in every figure and
+    merely old, which is what `prices_behind` already means. It is also the view the
+    snapshot showed minutes earlier, while Yahoo's row for the new session was still empty
+    (the "returned no usable bar" case above), so the view does not jump forward and back
+    across the open. The snapshot reports `prices_behind` true, `partial_session` false
+    and `as_of` the last complete session, with one note (in `notes` and `data_notes`)
+    that names the missing date or dates and the bar left out. That note replaces the
+    "Yahoo reports trading on ..." one, which would name the wrong day. A paid `desk` run
+    therefore stops unless `--allow-degraded`. No key is added to `snapshot_to_dict`.
+  - *The record.* It lives in the sidecar (`gap`). The price file stays exactly what Yahoo
+    delivered, unfinished bar included, and a record that does not fit its price file
+    discredits the sidecar. Such a download is never reused from the 15-minute window, so
+    "wait a minute and fetch again" reaches Yahoo and the flag clears once the row is
+    there. `data/prices.py` is unchanged and backtests read the same rows as before.
+  - *What is not a missing session.* A date Yahoo does not list. Two years of unadjusted
+    daily rows (`keepna=True`) for 22 shares, funds and indices in twelve markets, read on
+    2026-11-11, hold no row for an exchange holiday or a weekend; the five empty rows in
+    them (VOD.L 2026-07-30, BP.L 2025-02-27, VUSA.L 2025-10-24 and 2026-03-06, 005930.KS
+    2025-09-19) are ordinary trading days Yahoo has no data for, to this day. For
+    currencies and futures that reading fails: Yahoo lists a holiday as an empty row
+    (EURUSD=X, GBPUSD=X and JPY=X on 2025-12-25 and 2026-01-01; ES=F, GC=F and CL=F on
+    2025-05-26 and 2025-06-19), so `_NO_GAP_CHECK` leaves `CURRENCY` and `FUTURE` out.
+    `CRYPTOCURRENCY` is left out as it is from the late-close fill. Without session facts
+    nothing is looked for, because the instrument type is then unknown.
+  - *Cost.* At most one extra request per download, and Yahoo's unadjusted rows are never
+    read twice: the late-close fill reads them only when the newest usable bar is not an
+    unfinished session, this check only when it is. The request is skipped when the last
+    two usable bars are consecutive calendar days, since no session can lie between them:
+    an ordinary Tuesday-to-Friday snapshot costs nothing more, the first session after a
+    weekend or a holiday costs one request.
+  - *An earlier fill is carried over.* If the previous download filled that very session
+    (a `late_close` in its sidecar, made before the open while the row lacked only its
+    close), `_carried_fill` puts the bar back between the last two bars instead of
+    reporting a gap. Once the next session trades, Yahoo's last regular-market price is
+    today's, so the bar cannot be built again and the record is the only copy. The guards
+    are the fill's, read for a bar that is no longer the newest: the instrument is not
+    left out above; the record is for the one date Yahoo lists between the two bars; it
+    is a whole bar (positive open, high, low, close and volume) with its close inside its
+    own low-to-high range; that session is over; Yahoo's row for it still has no close (a
+    close Yahoo has is the one to show, and the next download brings it); the usable bar
+    before it reads the same adjusted and unadjusted; and that bar is the one the record
+    followed in the earlier download, with the same close, so nothing was restated since
+    (a split, which the adjusted-against-unadjusted check cannot see). Any failure
+    reports the gap as if there had been no earlier download. The carried bar is recorded
+    in the new sidecar like any fill and never written to the price file; `prices_behind`
+    is false, `partial_session` true, and the late-close note is given wherever the bar is
+    in view, including a past `date` that ends on it. When Yahoo delivers the row, the
+    frame holds Yahoo's bar and the record is dropped.
+  - *Known limits.* The hole is looked for only behind an unfinished bar: behind a
+    finished or undecided newest bar (a row Yahoo never fills, read after the close) it
+    is still not reported, and a bar carried over during the session is gone then too. A
+    download in between that cannot use the earlier fill (Yahoo's rows for both sessions
+    empty, the "returned no usable bar" case) does not keep the record, so the next one
+    reports the gap. A missing day behind a cryptocurrency's bar (seen on BTC-USD the
+    same morning) is still not reported. A date Yahoo leaves out of its answer altogether
+    cannot be told from a holiday. When the unadjusted rows cannot be read, nothing is
+    reported. Where Yahoo never fills a row, the whole of the following session is flagged.
 - **Lookahead guard**: fundamentals/news are injected only when the snapshot is for the
   newest bar. A past `date` never receives them (Yahoo serves current values only).
   `anonymize=True` also drops them, since company figures and headlines defeat masking.
@@ -624,7 +700,9 @@ main() entry: `python -m tradinglab.cli <cmd>`, or the `tradinglab` console comm
   word-like tickers; session state on the exchange clock (US boundary, Tokyo, crypto,
   half-day, unknown), the stale threshold, prices behind; the download policy (desk-only
   cache, 15-minute reuse, retry, fallback, sidecar); late closes (each fill condition,
-  the sidecar record, reuse, and the unchanged backtest path); `snapshot` / `desk` CLI output,
+  the sidecar record, reuse, and the unchanged backtest path); a session missing behind
+  the one in progress (the London and Frankfurt shape, what stays quiet, the request
+  budget, the carried-over fill and each of its guards); `snapshot` / `desk` CLI output,
   encoding safety, artifacts and the spend gate, with the pipeline stubbed.
 - **test_skill_package.py**: skill frontmatter and packaging rules; every `tradinglab ...`
   line in the skill's docs is parsed with the real argparse parser, so renaming a

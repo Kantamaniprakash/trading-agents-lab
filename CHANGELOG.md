@@ -20,6 +20,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dividend the row is not filled, nor when Yahoo sent an empty row for a session between
   the last complete bar and that row. Backtests and every other command read prices
   as before.
+- `cli snapshot` and `cli desk`: a session Yahoo had no bar for, just behind the session
+  in progress, was skipped without a word. Seen on London and Frankfurt shares for about
+  half an hour after the open: the row of the session that closed the evening before is
+  empty while today's row has values, so the snapshot was dated today, flagged only as
+  unfinished, and its one-day change and every indicator ran across the missing day. The
+  desk now reads Yahoo's unadjusted rows when the newest bar is unfinished and a calendar
+  day lies between it and the bar before. If Yahoo lists a session there, the snapshot
+  ends at the last complete session (the unfinished bar is left out), is flagged
+  `prices_behind`, and one note (in `notes` and in the prompt) names the missing date;
+  fetching again later clears it. If an earlier download had filled that session's close
+  (the fix above), its bar is put back instead, under the same guards, and nothing is
+  missing. An exchange holiday is not reported, because Yahoo does not list one for
+  shares, funds and indices; currencies and futures, where it lists a holiday as an empty
+  row, and cryptocurrencies are not checked. This costs one Yahoo request at most, never
+  on top of the late-close one, and none when the last two bars are consecutive days. Not
+  covered: the same hole behind a newest bar that is already final. No JSON key is added,
+  and backtests and every other command read prices as before.
 
 ## [0.2.0] - 2026-11-10
 
