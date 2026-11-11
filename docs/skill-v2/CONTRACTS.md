@@ -12,16 +12,17 @@ references/lab.md
 scripts/get_data.py     network, reads no files
 scripts/brief.py        no network
 scripts/render.py       no network
+scripts/page.py         no network
 LICENSE.txt
 ```
 
-## 1. Rules for all three scripts
+## 1. Rules for all four scripts
 
 - Python 3.9 grammar and standard library only. Allowed imports: `sys, json, math, re, hashlib,
   datetime, html, urllib.request, urllib.parse, urllib.error` (the three `urllib` ones only in
   `get_data.py`).
 - Each script is at most 20,000 bytes. Targets: `get_data.py` 5,000, `brief.py` 14,000,
-  `render.py` 19,000.
+  `render.py` 14,000, `page.py` 12,000.
 - No `os`, `subprocess`, `socket`, `eval`, `exec`, `open` for writing except the output paths given
   on the command line, no environment access in the script's own code.
 - Inputs are read as bytes. A UTF-8 or UTF-16 byte-order mark is accepted and removed. Unicode minus
@@ -40,10 +41,10 @@ LICENSE.txt
 
 - Each script holds `SELF = "<12 hex>"`: the first 12 hex digits of SHA-256 over its own text with
   the `SELF` line removed, line endings normalised to LF and trailing whitespace stripped.
-  `brief.py` and `render.py` check it on every run (they read their own file). `get_data.py` does
+  `brief.py`, `render.py` and `page.py` check it on every run (they read their own file). `get_data.py` does
   not read itself.
-- `brief.py` also holds `SIBLINGS = {"get_data.py": "<12 hex>", "render.py": "<12 hex>"}`.
-- `python brief.py --preflight <dir>` checks itself and both siblings in `<dir>`, runs the
+- `brief.py` also holds `SIBLINGS = {"get_data.py": "<12 hex>", "render.py": "<12 hex>", "page.py": "<12 hex>"}`.
+- `python brief.py --preflight <dir>` checks itself and the three siblings in `<dir>`, runs the
   indicator known-answer test, and prints `PREFLIGHT ok 2.0.0 python <version>` or exits 3.
 - `render.py` runs a built-in known-answer case on every run: one draft that must render and one
   that must be refused.
@@ -220,7 +221,7 @@ low52 | bear | on a close below
 ## 5. `render.py`
 
 ```
-python render.py BRIEF DRAFT OUT_MD OUT_HTML [--attempt N]
+python render.py BRIEF DRAFT OUT_MD OUT_REPORT [--attempt N]
 python render.py --verify BRIEF OUT_MD
 ```
 
@@ -237,8 +238,8 @@ Errors (exit 1, one line each on stdout, `FIX <slot>: <what> | try: <nearest fac
 | `D_NOTE` | The brief has an unfinished session and the draft says "close" for the last price |
 | `D_LEN` | A prose slot over 600 characters |
 
-On success it writes the Markdown report and the HTML page, prints the Markdown report, and prints
-the receipt as the last lines. The receipt is generated, never typed by the agent:
+On success it writes the Markdown report and the resolved report (`report.v1`, below), prints the
+Markdown report, and prints the receipt as the last lines. The receipt is generated, never typed by the agent:
 
 ```
 Figures: <n> inserted by code from the data. Quantity words: <k>, not checked.
@@ -249,15 +250,53 @@ This covers sourcing and arithmetic, not judgment.
 `report_id` is the first 8 hex of SHA-256 over the report body. `--verify` recomputes the figures
 and both ids from the brief and the saved Markdown and prints `VERIFY ok` or the differences.
 
-The Markdown report and the HTML page carry the same content: header, the argument and the paper
+The Markdown report and the page carry the same content: header, the argument and the paper
 desk, why, bull against bear, levels, risk review, data notes (from the brief's notes and flags,
 skipped roles, how the roles ran), headlines the desk saw, receipts with the test record and the
 disclaimer. Fixed texts come from the brief. Headline text is escaped and shown only in the
 headlines block and where `{{hN}}` is used.
 
-The HTML page is self-contained: inline CSS, inline SVG, no JavaScript, no external requests.
+### `report.v1`
 
-## 6. Tests
+Every reference is already resolved to text, so `page.py` needs no reference engine.
+
+```json
+{"schema": "report.v1", "symbol": "NVDA", "report_id": "9f3a1c2e", "attempt": 1, "figures": 31,
+ "quantity_words": 0, "script": "2.0.0",
+ "argument": {"code": "NEUTRAL", "text": "Neither side won"},
+ "desk": {"action": "HOLD", "size": 0.0, "text": "No trade"},
+ "why": "...",
+ "bull": {"claim": "...", "evidence": [{"label": "RSI(14)", "text": "23.95"}], "also": "...", "weak": "..."},
+ "bear": {"claim": "...", "evidence": [], "also": "...", "weak": "..."},
+ "levels": [{"label": "Previous close, 2026-11-09", "price": 178.67, "price_t": "178.67",
+             "gap_t": "+5.8%", "side": "bull", "words": "..."}],
+ "risk": "...", "roles": "...", "skipped": [], "headlines_used": ["h1"],
+ "receipt": ["...", "...", "..."]}
+```
+
+`argument.text` is "The bull case won", "The bear case won" or "Neither side won". `desk.text` is
+"No trade" for HOLD, and for BUY and SELL a size word and direction ("Small long", "Small short";
+"Medium" from 0.34, "Large" from 0.67).
+
+## 6. `page.py`
+
+```
+python page.py BRIEF REPORT OUT_HTML
+```
+
+Draws the report as one self-contained HTML page: inline CSS, inline SVG, no JavaScript, no external
+requests. It prints `PAGE ok <SYMBOL> <report_id> bytes=<n>`. Every string from both inputs is
+escaped. Layout, in order: a dark header band with four tiles (the argument, the paper desk, the
+last close with its one-day change, the count of figures inserted by code); the "why" text in large
+type; a notice strip when the brief has flags; the price chart with the 50-day and 200-day averages
+and the report's levels, beside indicator meters on their real scales and the returns; bull and
+bear as two equal cards; the levels with a price ladder, beside the risk review; statement figures
+as tiles, beside the headlines the desk saw; receipts with the test record made prominent.
+
+No composite score, dial, star rating or tier badge. A BUY or SELL outcome is shown in the same
+plain style as a HOLD. Colour is never the only carrier of meaning.
+
+## 7. Tests
 
 - Parity: `brief.py` indicators equal the package's on 200 seeded synthetic series (relative 1e-9
   on values, equal display text).

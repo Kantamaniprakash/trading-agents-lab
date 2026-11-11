@@ -24,16 +24,18 @@ prediction.
 
 ## How version 2 works
 
-Three small scripts, Python standard library only (3.9 or newer), nothing installed.
+Four small scripts, Python standard library only (3.9 or newer), nothing installed.
 
 | Script | Network | Job |
 |---|---|---|
 | `get_data.py` | yes, one host | Downloads daily prices with session facts, headlines and statement figures. Reads no files. Identifies itself honestly, uses no cookies and no login step |
 | `brief.py` | no | Validates the data, computes the indicators and about 80 named facts, writes every data problem as a flag and a note, prints the fact sheet the desk reads |
-| `render.py` | no | Reads the agent's draft, inserts every figure by reference, refuses any digit the agent typed, applies the decision rules, prints the report and writes the page |
+| `render.py` | no | Reads the agent's draft, inserts every figure by reference, refuses any digit the agent typed, applies the decision rules and prints the report |
+| `page.py` | no | Draws the finished report as one self-contained page |
 
 The buyer's agent does five things: check Python is available, get the data, build the brief, run
-the desk roles and write a draft, render. On a failed render it fixes the draft, at most twice.
+the desk roles and write a draft, render, draw the page. On a failed render it fixes the draft, at
+most twice.
 
 ### Report by reference
 
@@ -55,11 +57,13 @@ that the desk chose the facts that matter, or that its view is any good. Quantit
 
 ### The page
 
-`render.py` writes one self-contained HTML page: a header band with four summary tiles, a price
+`page.py` writes one self-contained HTML page: a header band with four summary tiles, the "why"
+sentence in large type, a price
 chart with the two averages and the levels that would change the view, indicator meters on their
 real scales, bull against bear in two equal columns, the levels table, the risk review,
 fundamentals, the headlines the desk saw, and the receipts. No score dial, no tier badge: the desk
-has no validated score. It also prints the same report as Markdown for the chat.
+has no validated score. The owner chose this layout from three working mock-ups. `render.py`
+prints the same report as Markdown for the chat.
 
 ### Data
 
@@ -82,7 +86,7 @@ fundamentals absent, no headlines, short history.
 ### Integrity
 
 Each script carries the hash of its own text and stops if it was copied wrongly. One preflight
-command checks all three copies and runs known-answer tests on the indicator code and on the
+command checks all four copies and runs known-answer tests on the indicator code and on the
 renderer.
 
 ## What leaves the skill
@@ -100,7 +104,7 @@ lab, unchanged. The skill no longer installs it, so fixes no longer need a relea
 | Browser disguise and login step for fundamentals? | No | Statement figures are available without them, each with its own date |
 | Twelve roles or fewer? | Twelve in 2.0, decided by experiment later | Change one layer at a time |
 | A score or a probability? | Neither | Neither can be validated at any sample size a buyer will reach |
-| One big script or three? | Three, each under 20 KB | One talks to the network and reads nothing. Two read files and never touch the network |
+| One big script or several? | Four, each under 20 KB | One talks to the network and reads nothing. Three read files and never touch the network. The page is separate so the checked report does not depend on it |
 
 ## Engineering
 
@@ -115,7 +119,7 @@ lab, unchanged. The skill no longer installs it, so fixes no longer need a relea
 
 ## Phases
 
-1. Version 2.0: the three scripts, the rewritten skill, tests, lint, CI, the canary, buyer-style
+1. Version 2.0: the four scripts, the rewritten skill, tests, lint, CI, the canary, buyer-style
    test runs on several instruments, new listing text. The listing makes no measured claim yet.
 2. The proof: a protocol committed before any run. Three arms: an agent alone, an agent with the
    same fact sheet and no renderer, and the full skill, judged by an independent audit. Results by
