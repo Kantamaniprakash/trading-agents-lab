@@ -35,7 +35,6 @@ from tradinglab.config import (  # noqa: E402
     DATA_CACHE_DIR,
     DEFAULT_TICKERS,
     LLM_CACHE_DIR,
-    PROJECT_ROOT,
     RESULTS_DIR,
     AgentConfig,
     BacktestConfig,
@@ -460,6 +459,10 @@ def cmd_agents(args: argparse.Namespace) -> None:
     print(f"transcripts: {out_dir}")
 
 
+_WRITES_RESULTS = {"baselines", "train-ml", "agents", "desk", "probe"}
+_USES_LLM_CACHE = {"agents", "desk", "probe"}
+
+
 def _exit_unwritable(directory: Path, exc: OSError) -> None:
     print(
         f"error: cannot write to {directory} ({exc.strerror or exc}). "
@@ -569,10 +572,9 @@ def cmd_desk(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # The transcript is the product of a paid run. Prove it can be saved
-    # before paying for it.
+    # before paying for it (main() has already checked the LLM cache).
     out_dir = RESULTS_DIR / "desk"
-    for directory in (out_dir, LLM_CACHE_DIR):
-        _require_writable(directory)
+    _require_writable(out_dir)
 
     agent_cfg = AgentConfig(debate_rounds=args.debate_rounds)
     print(
@@ -870,11 +872,14 @@ def main(argv: list[str] | None = None) -> None:
             reconfigure(errors="backslashreplace")
 
     args = build_parser().parse_args(argv)
-    try:
-        for directory in (RESULTS_DIR, DATA_CACHE_DIR):
-            directory.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        _exit_unwritable(PROJECT_ROOT, exc)
+    # Commands whose product is a file must be able to write it, and say so in
+    # one line when they cannot, before doing any work or spending anything.
+    # The price cache is best-effort everywhere (fetch_prices warns), and
+    # "snapshot", "download" and "report" produce nothing else on disk.
+    if args.command in _WRITES_RESULTS:
+        _require_writable(RESULTS_DIR)
+    if args.command in _USES_LLM_CACHE:
+        _require_writable(LLM_CACHE_DIR)
     args.func(args)
 
 

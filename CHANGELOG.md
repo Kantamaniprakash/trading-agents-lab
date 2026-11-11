@@ -45,10 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Headlines are collapsed to a single line of at most 200 characters, so third-party text
   cannot pose as a section of the prompt.
 - An empty price download raises `PriceDataError` (still a `ValueError`) whose message and
-  `reason` say whether Yahoo was rate-limiting or did not know the symbol. It used to
-  blame the symbol in both cases.
+  `reason` say whether Yahoo was rate-limiting or did not know the symbol, when Yahoo said
+  which. It used to blame the symbol in every case.
 - A price cache directory that cannot be written is a warning, not an error: prices that
   were downloaded are still returned.
+- Commands that save results (`baselines`, `train-ml`, `agents`, `probe`, `desk`) check at
+  start-up that the results folder is really writable and exit with one line naming
+  `TRADINGLAB_HOME` if it is not. `snapshot`, `download` and `report` no longer need it.
+- The quarterly revenue and net income lines name the currency the company reports in
+  when Yahoo provides it (`Quarterly revenue (USD, newest first)`).
 
 ### Fixed
 - `--anonymize` no longer rewrites the tables for tickers that are also words or labels.

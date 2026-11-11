@@ -49,8 +49,11 @@ class _YahooLog(logging.Handler):
 
 
 _RATE_LIMIT_MARKS = ("ratelimit", "rate limit", "too many requests")
-_NOT_FOUND_MARKS = ("quote not found", "not found for symbol", "possibly delisted",
-                    "no timezone found", "no data found", "no price data found")
+# Only Yahoo's own "this symbol does not exist" answers. yfinance's catch-all
+# texts ("possibly delisted", "no timezone found", "no price data found") are
+# NOT here: it logs those for every request it swallowed, including timeouts,
+# connection resets and 5xx responses, where the symbol is perfectly valid.
+_NOT_FOUND_MARKS = ("quote not found", "not found for symbol", 'yahoo error = "no data found')
 
 
 def _empty_download_error(ticker: str, start: str, end: str | None,
@@ -68,7 +71,8 @@ def _empty_download_error(ticker: str, start: str, end: str | None,
             "it in that range. Check the symbol.", "not_found")
     return PriceDataError(
         f"{prefix}: no reason was given. The symbol or date range may be "
-        "wrong, or Yahoo may be rate-limiting: wait a minute and retry.", "unknown")
+        "wrong, Yahoo may be rate-limiting, or this machine cannot reach "
+        "Yahoo: wait a minute and retry.", "unknown")
 
 
 def _warn_cache_unwritable(cache_root: Path, exc: OSError) -> None:

@@ -73,6 +73,11 @@ def fetch_fundamentals_snapshot(ticker: str) -> dict:
         snapshot: dict = {"available": True, "ticker": ticker}
         for name, key in _INFO_KEYS.items():
             snapshot[name] = info.get(key)
+        # The currency the company reports its statements in. It is often not
+        # the currency the shares trade in (London quotes in pence, ADRs in
+        # dollars), so the statement lines are labelled with it.
+        reported_in = info.get("financialCurrency")
+        snapshot["financial_currency"] = reported_in if isinstance(reported_in, str) else None
         try:
             stmt = tkr.quarterly_income_stmt
         except Exception:
@@ -117,6 +122,8 @@ def format_fundamentals(snapshot: dict) -> str:
         f"  Revenue growth:    {_fmt_num(snapshot.get('revenue_growth'), pct=True)}",
         f"  Earnings growth:   {_fmt_num(snapshot.get('earnings_growth'), pct=True)}",
     ]
+    reported_in = snapshot.get("financial_currency")
+    order = f"{reported_in}, newest first" if reported_in else "newest first"
     for label, key in (
         ("Quarterly revenue", "quarterly_revenue"),
         ("Quarterly net income", "quarterly_net_income"),
@@ -124,5 +131,5 @@ def format_fundamentals(snapshot: dict) -> str:
         trend = snapshot.get(key) or {}
         if trend:
             parts = ", ".join(f"{d}: {_fmt_size(v)}" for d, v in trend.items())
-            lines.append(f"  {label} (newest first): {parts}")
+            lines.append(f"  {label} ({order}): {parts}")
     return "\n".join(lines)

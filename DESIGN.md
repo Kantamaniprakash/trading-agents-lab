@@ -110,7 +110,10 @@ def load_universe(cfg: DataConfig) -> dict[str, pd.DataFrame]   # convenience wr
 - An empty download raises `PriceDataError(ValueError)` with `reason` in `rate_limited`,
   `not_found`, `unknown`. Yahoo answers a rate limit and an unknown symbol with the same
   empty frame, so the reason is recovered from what yfinance logs during the download
-  (a temporary handler on the `yfinance` logger).
+  (a temporary handler on the `yfinance` logger). Only Yahoo's own statements count as
+  `not_found` ("Quote not found", "No data found, symbol may be delisted"). yfinance's
+  catch-all "possibly delisted" texts do not: it logs those for timeouts, resets and 5xx
+  responses on valid symbols, which must be retried, not blamed on the symbol.
 - Cache writes are best-effort: an `OSError` from `mkdir` or `to_parquet` becomes a
   `RuntimeWarning` naming `TRADINGLAB_HOME`, and the downloaded frame is still returned.
 
@@ -460,10 +463,12 @@ def render_decision_card(log, desk) -> str
   never the research cache: they can end in an intraday bar, which must not reach a
   backtest through a shared file.
 - **The sidecar must describe its price file.** `*.meta.json` records the download time,
-  the newest bar's date and the exchange facts. It is written (atomically) right after
-  the download and again once the metadata request returns, and a sidecar whose
-  `last_bar` does not match the parquet is ignored, so an interrupted run cannot leave
-  new prices judged by an old calendar. Cache writes are best-effort: an unwritable
+  a fingerprint of the frame (row count, newest bar's date, close and volume) and the
+  exchange facts. It is written (atomically) right after the download and again once the
+  metadata request returns, and a sidecar whose fingerprint does not match the parquet is
+  ignored, so neither an interrupted run nor a failed cache write can leave prices judged
+  by another download's time and calendar. A download whose session state came out
+  undecided is not reused from the 15-minute window: a second look is what settles it. Cache writes are best-effort: an unwritable
   directory costs the cache, not the run.
 - **Session state uses the exchange's own clock.** Yahoo dates a daily bar by the
   exchange's local day and includes the session in progress. `_fetch_session_info` reads
@@ -471,10 +476,15 @@ def render_decision_card(log, desk) -> str
   time from Yahoo's chart metadata (one request per download). With it,
   `_last_bar_is_partial` covers Tokyo, crypto (today's bar is never final) and US
   half-days. The calendar is cross-checked, not trusted: it has been seen an hour early
-  for a venue, with trades still printing. Trades after the calendar's close mean
-  "unknown" until the feed has been quiet for `_FEED_QUIET` (45 min); a last trade before
-  the close keeps the bar open for `_MAX_FEED_DELAY` (30 min) past the settle window,
-  because Yahoo's quotes run 10 to 20 minutes behind on many venues. Without a calendar,
+  for a venue, with trades still printing. A trade stamped up to an hour (plus the settle
+  window) after the calendar's close means "unknown" until the feed has been quiet for
+  `_FEED_QUIET` (45 min); one stamped later than that is a late-reported print (London),
+  and an index is exempt altogether, because Yahoo publishes index closes about an hour
+  after the bell. A last trade before the close keeps the bar open for `_MAX_FEED_DELAY`
+  (30 min) past the settle window, because Yahoo's quotes run 10 to 20 minutes behind on
+  many venues. Known limit: where the calendar is an hour early AND the feed is delayed,
+  a delayed trade can fall in the 15 minutes after the calendar's close and the bar is
+  called final up to 15 minutes too soon. Without a calendar,
   only plainly old bars (36 h rule) and US-style symbols (New York clock) are decided;
   anything else is `None` and reported as unknown, never guessed as a close. If Yahoo reports trading on a later day than the newest usable bar
   (it sometimes returns a row with volume and no prices, which the loader drops), the
@@ -487,7 +497,12 @@ def render_decision_card(log, desk) -> str
 - **Old versus stale.** A newest bar more than `_OLD_BAR_NOTE_DAYS` (5) old is noted; more
   than `_STALE_AFTER_DAYS` (12) sets `stale`, which stops the paid desk. Twelve days is
   longer than any scheduled exchange closure, so a holiday week is not mistaken for a
-  halted symbol.
+  halted symbol. The holiday / halted wording follows the bar's age when it was
+  downloaded: after a failed refresh a bar can be old only because the download is.
+- **Currencies.** The chart metadata's currency is what prices are quoted in; a note says
+  so for anything but USD and spells out minor units (GBp is pence). Statements are often
+  in another currency (`financialCurrency`): the quarterly lines carry it, and a note
+  says when it differs from the share currency.
 - **"available" is not trusted.** Yahoo answers a rate-limited fundamentals request with
   `available: True` and no figures. `missing_ratio_fields` counts the ratios that actually
   arrived; an all-empty answer is retried once; an answer with nothing in it yields
@@ -519,14 +534,17 @@ argparse with subcommands (all print readable tables and save CSV/PNG to results
   decision days. With `--json`, stdout carries the JSON only and progress goes to stderr.
   **Spend gate**: exits 1 before any LLM call when the snapshot is stale, prices are
   behind, or live data was asked for (`live_attempted`, set by the snapshot builder, not
-  inferred from the flags) and none came back; `--allow-degraded` overrides. It also
-  proves `results/desk/` and the LLM cache are writable by creating a file there, so a
-  paid run cannot be lost to an unwritable folder afterwards.
+  inferred from the flags) and none came back; `--allow-degraded` overrides.
 - Output discipline for both: JSON on stdout is ASCII-only (`ensure_ascii=True`) and
   `main()` sets `errors="backslashreplace"` on stdout/stderr, because headlines and LLM
   text hold arbitrary characters and a Windows pipe (cp1252) would otherwise abort the
-  print. `main()` also reports an unwritable data directory as one `error:` line naming
-  `TRADINGLAB_HOME` instead of a traceback.
+  print.
+- Write checks: for the commands whose product is a file (`baselines`, `train-ml`,
+  `agents`, `probe`, `desk`) `main()` proves `results/` is writable by really creating a
+  file there (`mkdir(exist_ok=True)` succeeds on a read-only folder), and for the three
+  that call the API the LLM cache too, and exits with one `error:` line naming
+  `TRADINGLAB_HOME` otherwise, before any work or spend. `snapshot`, `download` and
+  `report` need neither; the price cache is best-effort everywhere.
 - `report` — load saved CSVs and print a combined summary.
 main() entry: `python -m tradinglab.cli <cmd>`, or the `tradinglab` console command.
 `--version` prints `tradinglab <version>`; the skill's setup check compares it.

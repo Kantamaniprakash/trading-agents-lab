@@ -36,8 +36,11 @@ _FIXED_TIMESTAMP = (2026, 1, 1, 0, 0, 0)
 _YAML_UNSAFE_START = tuple("!&*[]{}>|@`'\"%#,?-")
 # Plain scalars that YAML resolves to something other than a string.
 _YAML_NON_STRING = re.compile(
-    r"(?i)(true|false|yes|no|on|off|null|~|y|n"
-    r"|[-+]?(\d[\d_]*)?\.?\d+([eE][-+]?\d+)?|0x[0-9a-f]+|0o[0-7]+"
+    r"(?i)(true|false|yes|no|on|off|null|~|y|n|=|<<"
+    r"|[-+]?(\d[\d_]*)?\.?\d+([eE][-+]?\d+)?"
+    r"|[-+]?\d[\d_]*\.[\d_]*([eE][-+]?\d+)?"
+    r"|[-+]?0b[01_]+|[-+]?0x[0-9a-f_]+|[-+]?0o?[0-7_]+"
+    r"|[-+]?\d[\d_]*(:[0-5]?\d)+(\.[\d_]*)?"
     r"|[-+]?\.(inf|nan)|\d{4}-\d{1,2}-\d{1,2}([Tt ].*)?)"
 )
 _RELEASE_URL_RE = re.compile(

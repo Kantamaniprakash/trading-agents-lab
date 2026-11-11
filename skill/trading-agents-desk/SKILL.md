@@ -114,7 +114,8 @@ It says which of these happened.
 - "cannot write to": use `TRADINGLAB_HOME` as described in Setup.
 - Anything else: report the message and stop.
 
-On success stdout is one JSON document with these keys.
+On success stdout is one JSON document. These are the keys to use; ignore
+any others.
 
 | Key | What to do with it |
 |---|---|
@@ -143,7 +144,9 @@ On success stdout is one JSON document with these keys.
   request. Wait 30 seconds and fetch once more. Keep whichever result has
   fewer gaps. Do not retry a second time. Funds, crypto, indices and
   currencies never have company fundamentals, so do not retry for those.
-- **Still no fundamentals block:** skip the fundamentals analyst.
+- **No fundamentals block, or `instrument_type` is not `EQUITY`:** skip the
+  fundamentals analyst. A fund's or a coin's block holds a market cap and
+  little else.
 - **Still no headlines:** skip the news and sentiment analysts. If you have a
   web search tool you may instead collect up to 8 recent headlines (date,
   publisher, title) and use them as the news block. Say in the report that
@@ -155,9 +158,10 @@ On success stdout is one JSON document with these keys.
 - **Report while the data is fresh.** If `partial_session` is not `false`
   and more than 30 minutes have passed since `fetched_at` by the time you
   write the report, fetch again first.
-- **Several tickers:** run them one at a time and leave about 20 seconds
-  between fetches. Say that the desk has no portfolio-level view: the
-  decisions are independent.
+- **Several tickers:** fetch them one at a time, about 20 seconds apart.
+  Run a separate desk and write a separate report section for each. Say
+  once that the desk has no portfolio-level view: the decisions are
+  independent.
 
 ### Step 3: run the desk
 
@@ -186,8 +190,8 @@ quietly imports outside facts cannot be checked by the user.
 
 ### Step 4: report
 
-Use this template. Tell the user the full analyst reports and debate are
-available, and show them when asked.
+Use this template. Show the full analyst reports and debate when the user
+asks for them.
 
 ```markdown
 ## <TICKER> (<company>) desk view, as of <as_of> (<"close" or "last price"> <last_close> <currency>, prices fetched <fetched_at>)
@@ -207,7 +211,9 @@ available, and show them when asked.
 - <Two or three concrete, observable conditions.>
 
 ### Data notes
-- <Each item from `notes`, any analysts skipped, where headlines came from, which seats did not run in their own context, and that the desk started from no position.>
+- <Each item from `notes` (or "no data problems reported"), any analysts skipped, where headlines came from, which seats did not run in their own context, and that the desk started from no position.>
+
+The full analyst reports, debate and risk comments are available on request.
 
 <disclaimer>
 ```

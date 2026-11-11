@@ -401,9 +401,18 @@ def test_archive_member_order_does_not_depend_on_the_platform(tmp_path):
                                       "references-extra.md", "references/guide.md"]
 
 
-@pytest.mark.parametrize("value", ["true", "No", "null", "~", "42", "1.5", "1e3", "2026-01-01"])
+@pytest.mark.parametrize("value", ["true", "No", "null", "~", "42", "1.5", "1e3", "2026-01-01",
+                                   "0b101", "5.", "1:30", "+0x1F", "="])
 def test_frontmatter_values_yaml_would_not_read_as_text_are_rejected(tmp_path, value):
     skill = _make_skill(tmp_path, frontmatter=f"---\nname: demo-skill\ndescription: {value}\n---\n",
                         body="")
     with pytest.raises(ValueError, match="would not read the value"):
         build_skill.validate(skill)
+
+
+@pytest.mark.parametrize("value", ["0.2.0", "3 things", "1:30 pm", "10:30 start", "v0b1", "0xZZ",
+                                   "Runs a desk. Use when asked."])
+def test_frontmatter_values_that_are_text_are_accepted(tmp_path, value):
+    skill = _make_skill(tmp_path, frontmatter=f"---\nname: demo-skill\ndescription: {value}\n---\n",
+                        body="")
+    assert build_skill.validate(skill)
