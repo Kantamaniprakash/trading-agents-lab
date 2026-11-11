@@ -2858,11 +2858,32 @@ def _cache_files(state, folder):
     return folder / "desk" / f"{stem}.parquet", folder / "desk" / f"{stem}.meta.json"
 
 
-def _gap_note(missing: str = LATE_DAY, ends: str = DAY_BEFORE, in_progress: str = TODAY) -> str:
-    return (f"Yahoo returned no usable bar for {missing}, between the last complete session "
-            f"({ends}) and the session in progress ({in_progress}). A change measured across "
-            "that gap would be wrong, so the unfinished bar is left out and this snapshot ends "
-            f"at {ends}. Prices are at least one session behind.")
+def _gap_note(missing: str = LATE_DAY, ends: str = DAY_BEFORE, newest: str = TODAY) -> str:
+    return (f"Yahoo returned no usable bar for {missing}, between {ends} and the newest bar "
+            f"({newest}). A change measured across that gap would be wrong, so the newest bar "
+            f"is left out and this snapshot ends at {ends}. Prices are at least one session "
+            "behind.")
+
+
+def _refused(self, *_args, **_kwargs):
+    raise RuntimeError("Too Many Requests")
+
+
+def _blind(state, broken, how: str, minutes: int) -> pd.Timestamp:
+    """Arrange for the next download not to read Yahoo's unadjusted rows, in
+    one of the three ways that can happen. Returns when it is made."""
+    if how == "rows cannot be read":
+        broken.setattr(yf.Ticker, "history", _refused)
+    elif how == "no session facts":
+        broken.setattr(yf.Ticker, "get_history_metadata", _refused)
+    else:
+        # After the close, with the closing print in: a finished bar is not looked behind.
+        state["meta"]["regularMarketTime"] = _epoch(f"{TODAY} 16:35:00")
+        return pd.Timestamp(f"{TODAY} 17:10", tz="UTC")
+    return AFTER_OPEN + pd.Timedelta(minutes=minutes)
+
+
+BLIND = ["rows cannot be read", "no session facts", "the bar has finished"]
 
 
 def _unfinished_note(day: str = TODAY) -> str:
@@ -3000,13 +3021,16 @@ def test_a_holiday_between_the_last_two_bars_is_not_a_missing_session(venue, tmp
     ("BTC-USD", "CRYPTOCURRENCY", "UTC"),
     ("EURUSD=X", "CURRENCY", "Europe/London"),
     ("ES=F", "FUTURE", "America/New_York"),
+    ("XYZ.L", None, "Europe/London"),            # Yahoo did not say what it is
+    ("XYZ.L", "WARRANT", "Europe/London"),       # a type the reading was never checked for
 ])
-def test_an_empty_row_is_not_reported_for_crypto_currencies_or_futures(london, tmp_path, ticker,
-                                                                      kind, zone):
+def test_an_empty_row_is_only_a_missing_session_where_yahoo_lists_sessions_alone(
+        london, tmp_path, ticker, kind, zone):
     """For currencies and futures Yahoo lists a holiday as an empty row (seen
     on EURUSD=X for 2025-12-25 and on ES=F for 2025-05-26), so an empty row
     is no proof of a lost session. A cryptocurrency is left out as it is
-    from the late-close fill. None of them costs a request."""
+    from the late-close fill, and so is a type that is unknown or was never
+    checked. None of them costs a request."""
     london.update(ticker=ticker)
     london["meta"].update(instrumentType=kind, exchangeTimezoneName=zone, currency="USD")
     today = _open_the_session(london)
@@ -3026,7 +3050,8 @@ def test_a_missing_session_is_only_looked_for_behind_an_unfinished_bar(after_ope
                                                                       last_trade, state_of_bar):
     """The extra request is spent only while the newest bar is a session in
     progress. Known limit: behind a finished or undecided bar the same hole
-    is not looked for, and the snapshot reads as it did before."""
+    is not looked for, and with no earlier download that found it the
+    snapshot reads as it did before."""
     state = after_open
     state["meta"]["regularMarketTime"] = _epoch(f"{TODAY} {last_trade}")
     prices, desk = _snap(state, tmp_path, now=pd.Timestamp(f"{TODAY} {now}", tz="UTC"))
@@ -3038,20 +3063,16 @@ def test_a_missing_session_is_only_looked_for_behind_an_unfinished_bar(after_ope
 def test_nothing_is_looked_for_without_session_facts(after_open, tmp_path, monkeypatch):
     """No metadata means no instrument type, and so no telling whether Yahoo
     lists holidays for this symbol."""
-    def refused(self):
-        raise RuntimeError("Too Many Requests")
-
-    monkeypatch.setattr(yf.Ticker, "get_history_metadata", refused)
+    monkeypatch.setattr(yf.Ticker, "get_history_metadata", _refused)
     prices, desk = _snap(after_open, tmp_path)
     assert prices.session is None and after_open["tails"] == [] and prices.gap is None
     assert desk.as_of == TODAY and desk.partial_session is None and desk.prices_behind is False
 
 
-def test_rows_that_cannot_be_read_report_nothing(after_open, tmp_path, monkeypatch):
-    def refused(self, **_kwargs):
-        raise RuntimeError("Too Many Requests")
-
-    monkeypatch.setattr(yf.Ticker, "history", refused)
+def test_rows_that_cannot_be_read_report_nothing_new(after_open, tmp_path, monkeypatch):
+    """With no earlier finding to stand on, an unreadable answer is no
+    evidence either way and the snapshot reads as it did before."""
+    monkeypatch.setattr(yf.Ticker, "history", _refused)
     prices, desk = _snap(after_open, tmp_path)
     assert prices.gap is None and prices.late_close is None
     assert desk.as_of == TODAY and desk.partial_session is True and desk.prices_behind is False
@@ -3111,7 +3132,9 @@ def test_a_close_filled_before_the_open_is_carried_into_the_session(venue, tmp_p
 
 
 @pytest.mark.parametrize("spoiled", ["yahoo has the close", "a dividend", "restated since",
-                                     "record out of its range", "record for another day"])
+                                     "record out of its range", "record for another day",
+                                     "the day is listed twice", "the bar it followed is gone",
+                                     "not over by this clock"])
 def test_an_earlier_fill_is_carried_only_under_the_guards_of_the_fill(venue, tmp_path, spoiled):
     """Whatever stops the fill stops the carry-over, and the gap is then
     reported as if there had been no earlier download."""
@@ -3122,6 +3145,7 @@ def test_an_earlier_fill_is_carried_only_under_the_guards_of_the_fill(venue, tmp
     sidecar = _cache_files(state, tmp_path)[1]
     record = json.loads(sidecar.read_text())
     prices_only = ["open", "high", "low", "close"]
+    now, ends = AFTER_OPEN, DAY_BEFORE
     if spoiled == "yahoo has the close":
         # Completed between the two requests. Yahoo's close is the one to
         # show, and the next download brings it.
@@ -3137,16 +3161,33 @@ def test_an_earlier_fill_is_carried_only_under_the_guards_of_the_fill(venue, tmp
     elif spoiled == "record out of its range":
         record["late_close"]["close"] = record["late_close"]["high"] * 1.01
         sidecar.write_text(json.dumps(record))
-    else:
+    elif spoiled == "record for another day":
         record["late_close"]["date"] = TODAY
         sidecar.write_text(json.dumps(record))
+    elif spoiled == "the day is listed twice":
+        # Two rows for one date, neither with a close: which one the record
+        # stands for cannot be said, and the date is still named once.
+        state["raw"] = pd.concat([state["raw"].iloc[:-1], _row(LATE_DAY), state["raw"].iloc[-1:]])
+    elif spoiled == "the bar it followed is gone":
+        # Yahoo no longer has the 9th at all. The record followed that bar,
+        # and nothing shows it would fit after the one before, not even a
+        # close that happens to be the same.
+        eve, prior = pd.Timestamp(DAY_BEFORE), state["history"].index[-2]
+        ends = f"{prior:%Y-%m-%d}"
+        for frame in ("adjusted", "raw"):
+            state[frame].loc[prior, "close"] = state[frame].loc[eve, "close"]
+            state[frame] = state[frame].drop(eve)
+    else:
+        # A clock set back to the evening of the 10th, on both venues: by it
+        # the session of the record is the one still running.
+        now = pd.Timestamp(f"{LATE_DAY} 22:30", tz="UTC")
 
-    prices, desk = _snap(state, tmp_path)
-    assert state["tails"] == [DAY_BEFORE] * 2
+    prices, desk = _snap(state, tmp_path, now=now)
+    assert state["tails"] == [DAY_BEFORE, ends]
     assert prices.late_close is None and prices.gap == {"missing": [LATE_DAY], "left_out": TODAY}
-    assert prices.df.index[-1] == pd.Timestamp(DAY_BEFORE)
-    assert desk.as_of == DAY_BEFORE and desk.prices_behind is True
-    assert desk.notes == [_gap_note(), state["currency_note"]]
+    assert prices.df.index[-1] == pd.Timestamp(ends)
+    assert desk.as_of == ends and desk.prices_behind is True
+    assert desk.notes == [_gap_note(ends=ends), state["currency_note"]]
 
 
 def test_every_listed_session_without_a_bar_is_named(venue, tmp_path):
@@ -3168,7 +3209,7 @@ def test_every_listed_session_without_a_bar_is_named(venue, tmp_path):
     assert state["tails"] == [DAY_BEFORE] * 2 and prices.late_close is None
     assert prices.gap == {"missing": [LATE_DAY, TODAY], "left_out": next_day}
     assert desk.as_of == DAY_BEFORE and desk.prices_behind is True
-    assert desk.notes == [_gap_note(f"{LATE_DAY}, {TODAY}", in_progress=next_day),
+    assert desk.notes == [_gap_note(f"{LATE_DAY}, {TODAY}", newest=next_day),
                           state["currency_note"]]
 
 
@@ -3254,6 +3295,15 @@ def test_a_gap_record_that_does_not_fit_the_price_file_discredits_the_sidecar(ya
     got = desk_mod._read_cached_prices(cache, sidecar)
     assert got.session is None and got.gap is None and len(got.df) == len(first.df)
 
+    # A filled bar goes after the newest bar or just before it, nowhere else:
+    # a record dated on a weekend further back does not fit either.
+    record["gap"] = None
+    record["late_close"] = {"date": "2026-03-08", "open": 1.0, "high": 1.0, "low": 1.0,
+                            "close": 1.0, "volume": 1.0}
+    sidecar.write_text(json.dumps(record))
+    got = desk_mod._read_cached_prices(cache, sidecar)
+    assert got.session is None and got.late_close is None and len(got.df) == len(first.df)
+
 
 def test_backtest_price_path_reads_the_same_rows_as_before(after_open, tmp_path):
     """``data/prices.py`` is untouched. What the backtests read for this
@@ -3290,3 +3340,168 @@ def test_cli_names_the_missing_session_and_the_desk_does_not_spend_on_it(offline
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "the prices are behind the market" in err and f"note: {note}" in err
+
+
+@pytest.mark.parametrize("blind", BLIND)
+def test_a_gap_stands_until_a_download_can_show_it_is_gone(after_open, tmp_path, monkeypatch,
+                                                         blind):
+    """Found in review: the gap was flagged, and the "wait a minute and fetch
+    once more" that followed came back clean because Yahoo's rows could not
+    be read that time, with the hole still there. Not having looked is not
+    having found nothing: what the previous download found between the same
+    two bars stands, without a request, until the date is there."""
+    state = after_open
+    first, _ = _snap(state, tmp_path)
+    assert first.gap == {"missing": [LATE_DAY], "left_out": TODAY} and len(state["tails"]) == 1
+    with monkeypatch.context() as broken:
+        when = _blind(state, broken, blind, minutes=1)
+        prices, desk = _snap(state, tmp_path, now=when)
+    assert state["downloads"] == 2 and len(state["tails"]) == 1     # downloaded, rows not read
+    assert prices.gap == first.gap and prices.late_close is None
+    pd.testing.assert_frame_equal(prices.df, state["history"], check_freq=False)
+    assert desk.as_of == DAY_BEFORE and desk.prices_behind is True
+    assert desk.notes[0] == _gap_note() and desk.stale is False
+    # On record, session facts or not, so the reuse window cannot serve it as whole.
+    assert json.loads(_cache_files(state, tmp_path)[1].read_text())["gap"] == first.gap
+    assert (prices.session is None) is (blind == "no session facts")
+
+    _open_the_session(state, yesterday=_closed_bar(state))          # Yahoo has the 10th
+    later, desk = _snap(state, tmp_path, now=when + pd.Timedelta(minutes=1))
+    assert state["downloads"] == 3 and later.gap is None
+    assert desk.as_of == TODAY and desk.prices_behind is False
+
+
+def test_a_gap_is_gone_when_yahoo_no_longer_lists_the_session(after_open, tmp_path):
+    """Rows that were read decide. If Yahoo stops listing the date (it was a
+    closure after all), the earlier finding does not outlive that answer."""
+    state = after_open
+    first, _ = _snap(state, tmp_path)
+    assert first.gap is not None
+    for frame in ("adjusted", "raw"):
+        state[frame] = state[frame].drop(pd.Timestamp(LATE_DAY))
+    prices, desk = _snap(state, tmp_path, now=AFTER_OPEN + pd.Timedelta(minutes=1))
+    assert len(state["tails"]) == 2 and prices.gap is None
+    assert desk.as_of == TODAY and desk.prices_behind is False
+    assert desk.notes == [_unfinished_note(), state["currency_note"]]
+
+
+@pytest.mark.parametrize("blind", BLIND)
+def test_a_carried_close_stays_while_the_same_two_bars_are_the_last(venue, tmp_path, monkeypatch,
+                                                                  blind):
+    """Once a fill has been checked against Yahoo's rows and put back between
+    two bars, a later download that cannot read those rows keeps it there:
+    the same two bars, the same close before it, nothing restated."""
+    state = venue
+    first, _ = _snap(state, tmp_path, now=LONDON_MORNING)
+    today = _open_the_session(state)
+    carried, _ = _snap(state, tmp_path)
+    assert carried.late_close == first.late_close and len(state["tails"]) == 2
+    with monkeypatch.context() as broken:
+        when = _blind(state, broken, blind, minutes=16)             # past the reuse window
+        prices, desk = _snap(state, tmp_path, now=when)
+    assert state["downloads"] == 3 and len(state["tails"]) == 2
+    assert prices.late_close == first.late_close and prices.gap is None
+    pd.testing.assert_frame_equal(prices.df, carried.df, check_freq=False)
+    assert desk.as_of == TODAY and desk.last_close == today["close"]
+    assert desk.prices_behind is False
+    assert desk.notes[0] == _late_note(first.late_close["close"])
+    assert desk.partial_session is {"rows cannot be read": True, "no session facts": None,
+                                    "the bar has finished": False}[blind]
+    record = json.loads(_cache_files(state, tmp_path)[1].read_text())
+    assert record["late_close"] == first.late_close and record["gap"] is None
+
+
+@pytest.mark.parametrize("blind", BLIND)
+def test_a_carried_close_is_not_kept_unread_once_prices_were_restated(venue, tmp_path,
+                                                                    monkeypatch, blind):
+    state = venue
+    _snap(state, tmp_path, now=LONDON_MORNING)
+    _open_the_session(state)
+    carried, _ = _snap(state, tmp_path)
+    assert carried.late_close is not None
+    prices_only = ["open", "high", "low", "close"]
+    state["adjusted"][prices_only] = state["adjusted"][prices_only] / 2      # a split
+    with monkeypatch.context() as broken:
+        when = _blind(state, broken, blind, minutes=16)
+        prices, desk = _snap(state, tmp_path, now=when)
+    assert prices.late_close is None and prices.gap == {"missing": [LATE_DAY], "left_out": TODAY}
+    assert desk.as_of == DAY_BEFORE and desk.prices_behind is True
+    assert desk.notes[0] == _gap_note()
+
+
+def test_a_fill_never_checked_against_the_new_bar_is_reported_missing_when_rows_cannot_be_read(
+        venue, tmp_path, monkeypatch):
+    """The first download after the open cannot read Yahoo's rows. The fill
+    on record was the newest bar when it was made: whether it is the only
+    session between the last two bars was never checked, so it is not put
+    back. But its date is known to be a session these prices lack."""
+    state = venue
+    first, _ = _snap(state, tmp_path, now=LONDON_MORNING)
+    assert first.late_close["date"] == LATE_DAY
+    _open_the_session(state)
+    monkeypatch.setattr(yf.Ticker, "history", _refused)
+    prices, desk = _snap(state, tmp_path)
+    assert prices.late_close is None and prices.gap == {"missing": [LATE_DAY], "left_out": TODAY}
+    assert desk.as_of == DAY_BEFORE and desk.prices_behind is True
+    assert desk.notes == [_gap_note(), state["currency_note"]]
+
+
+@pytest.mark.parametrize("last_complete", ["2026-11-05", "2026-10-28"])     # 6 and 14 days back
+def test_the_age_of_the_newest_bar_is_that_of_the_bar_yahoo_delivered(venue, tmp_path,
+                                                                     last_complete):
+    """Found in review: with holidays before the missing session the view
+    ends six days back, and the snapshot added that the newest available bar
+    was six days old and the symbol perhaps halted. A newer bar was
+    available and left out. Past twelve days it was called stale as well."""
+    state = venue
+    state["history"] = state["history"].loc[:last_complete]
+    _open_the_session(state)
+    prices, desk = _snap(state, tmp_path)
+    assert prices.gap == {"missing": [LATE_DAY], "left_out": TODAY}
+    assert desk.as_of == last_complete and desk.prices_behind is True and desk.stale is False
+    assert desk.notes == [_gap_note(ends=last_complete), state["currency_note"]]
+
+
+@pytest.mark.parametrize("ticker,zone,now,last_trade,regular_end", [
+    # Sydney, 10:24 on the 11th: in UTC it is still the evening of the 10th.
+    ("BHP.AX", "Australia/Sydney", f"{LATE_DAY} 23:24", f"{LATE_DAY} 23:09:00", f"{TODAY} 05:00"),
+    # New York, 09:54 on the 11th.
+    ("AAPL", "America/New_York", f"{TODAY} 14:54", f"{TODAY} 14:39:00", f"{TODAY} 21:00"),
+])
+def test_the_missing_session_is_dated_on_the_exchange_clock(london, tmp_path, ticker, zone, now,
+                                                            last_trade, regular_end):
+    london.update(ticker=ticker)
+    _open_the_session(london)
+    london["meta"].update(exchangeTimezoneName=zone, currency="USD",
+                          regularMarketTime=_epoch(last_trade))
+    london["meta"]["currentTradingPeriod"]["regular"]["end"] = _epoch(regular_end)
+    prices, desk = _snap(london, tmp_path, now=pd.Timestamp(now, tz="UTC"))
+    assert london["tails"] == [DAY_BEFORE]
+    assert prices.gap == {"missing": [LATE_DAY], "left_out": TODAY}
+    assert desk.as_of == DAY_BEFORE and desk.prices_behind is True and desk.stale is False
+    assert desk.notes == [_gap_note()]
+
+
+def test_a_frame_of_one_bar_has_nothing_behind_it(venue, tmp_path):
+    """A listing on its first day: no bar before, nothing to ask about."""
+    state = venue
+    today = _open_the_session(state)
+    state["adjusted"] = _row(TODAY, **today)
+    prices = fetch_latest_prices(state["ticker"], cache_dir=tmp_path, now=AFTER_OPEN)
+    assert len(prices.df) == 1 and prices.gap is None and prices.late_close is None
+    assert state["tails"] == []
+
+
+def test_a_long_run_of_missing_sessions_is_summed_up_not_listed():
+    df = _synthetic_df()
+    now = pd.Timestamp("2026-03-20 15:00", tz="UTC")
+    week = [f"2026-03-{day}" for day in (16, 17, 18, 19)]
+    prices = LatestPrices(df=df, downloaded_at=now, gap={"missing": week, "left_out": "2026-03-20"},
+                          session=_session(end_utc="2026-03-20T20:00:00+00:00"))
+    desk = build_desk_snapshot("ABC", live=False, now=now, prices=prices)
+    assert desk.notes == [_gap_note("4 sessions from 2026-03-16 to 2026-03-19", LAST_BAR,
+                                    "2026-03-20")]
+    assert desk.prices_behind is True and desk.stale is False
+    three = replace(prices, gap={"missing": week[:3], "left_out": "2026-03-20"})
+    desk = build_desk_snapshot("ABC", live=False, now=now, prices=three)
+    assert desk.notes == [_gap_note(", ".join(week[:3]), LAST_BAR, "2026-03-20")]

@@ -199,10 +199,11 @@ The rule on this path is that a data problem is never analysed silently:
   evening before can be empty while today's row already has values. Left alone, the
   one-day change and every indicator would be measured across the missing day. The desk
   then leaves the unfinished bar out, ends the snapshot at the last complete session,
-  flags it `prices_behind` and names the missing date in a note; fetching again a little
-  later clears it. If an earlier run had already filled that session's close, its bar is
-  put back instead and nothing is missing. This is looked for only while the newest bar
-  is unfinished, and not for crypto, currencies or futures.
+  flags it `prices_behind` and names the missing date in a note. Fetching again a little
+  later clears it once Yahoo has the row, and only then. If an earlier run had already
+  filled that session's close, its bar is put back instead and nothing is missing. This
+  is looked for only while the newest bar is unfinished, and only for shares, funds and
+  indices: not for crypto, currencies or futures.
 - **Gaps are named.** An old bar (noted after 5 days, called stale after 12, which is
   longer than any scheduled exchange closure), a non-dollar price currency (pence and
   cents spelled out), statements reported in a different currency from the share price,
@@ -377,7 +378,7 @@ Findings a 3-month backtest could never show:
 
 ## Verification
 
-- 418 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
+- 457 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
   future rows → assert all earlier features/indicators/engine outputs are bit-identical).
 - A five-dimension adversarial review pass (lookahead, statistics, costs, data hygiene,
   prompt leakage — every finding independently re-verified before acceptance) surfaced
