@@ -360,7 +360,7 @@ Findings a 3-month backtest could never show:
 
 ## Verification
 
-- 310 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
+- 326 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
   future rows → assert all earlier features/indicators/engine outputs are bit-identical).
 - A five-dimension adversarial review pass (lookahead, statistics, costs, data hygiene,
   prompt leakage — every finding independently re-verified before acceptance) surfaced

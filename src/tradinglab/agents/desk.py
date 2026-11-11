@@ -107,6 +107,9 @@ class LatestPrices:
     session: dict | None = None
     # True when Yahoo returned nothing now and ``df`` is an earlier download.
     refresh_failed: bool = False
+    # True when only the second look at an undecided bar failed and ``df`` is
+    # the first look, minutes old: not behind, but the caller must be told.
+    recheck_failed: bool = False
 
 
 def _fetch_session_info(ticker: str) -> dict | None:
@@ -219,7 +222,9 @@ def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
     whether its last bar is final. An empty answer
     (Yahoo's response to rate limiting) is retried once. If it is still empty
     and an earlier download is on disk, that is returned with
-    ``refresh_failed=True`` so the caller can say the prices may be behind.
+    ``refresh_failed=True`` so the caller can say the prices may be behind
+    (or with ``recheck_failed=True`` when only a second look inside the reuse
+    window failed and the prices are still minutes old).
     With nothing on disk, or when Yahoo says the symbol does not exist, the
     ``ValueError`` from ``fetch_prices`` propagates.
     """
@@ -260,7 +265,7 @@ def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
                 if fresh_enough:
                     # Only a second look at an undecided bar failed. The
                     # prices are minutes old: still undecided, not behind.
-                    return cached
+                    return replace(cached, recheck_failed=True)
                 return replace(cached, refresh_failed=True)
             raise
 
@@ -669,6 +674,17 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
         session_notes.append(f"Prices are quoted in {currency}{detail}.")
     notes += session_notes
     data_notes = session_notes + data_notes
+    if prices.recheck_failed and not historical:
+        # For the caller only: the prices, and what the agents must know about
+        # them, are exactly those of the first look, so the prompt is unchanged.
+        age = (now - prices.downloaded_at).total_seconds()
+        notes.append(
+            "A fresh download to settle the state of the last bar was attempted "
+            "just now and failed (Yahoo returned nothing, which usually means it "
+            f"is rate-limiting). These are still the prices downloaded "
+            f"{_age_phrase(age)}, so nothing above has changed. Wait a minute "
+            "before fetching again."
+        )
 
     snapshot = snapshot_from_history(
         df, as_of, ticker, lookback=lookback, anonymize=anonymize,

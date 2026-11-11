@@ -989,22 +989,24 @@ def test_cli_snapshot_does_not_need_a_writable_results_directory(offline_cli, mo
 def _unwritable(monkeypatch, *folders):
     """Make creating a file fail in ``folders`` although they exist, which is
     what a read-only mount does (and what chmod cannot do to root)."""
-    real = cli.tempfile.mkstemp
+    real = os.open
     blocked = {str(folder) for folder in folders}
 
-    def mkstemp(*args, dir=None, **kwargs):
-        if str(dir) in blocked:
-            raise PermissionError(13, "Permission denied")
-        return real(*args, dir=dir, **kwargs)
+    def denied(path, flags, mode=0o777, **kwargs):
+        if flags & os.O_CREAT and os.path.dirname(os.fsdecode(path)) in blocked:
+            raise PermissionError(13, "Permission denied", os.fsdecode(path))
+        return real(path, flags, mode, **kwargs)
 
-    monkeypatch.setattr(cli.tempfile, "mkstemp", mkstemp)
+    monkeypatch.setattr(os, "open", denied)
 
 
 @pytest.mark.parametrize("argv,folder", [
     (["desk", "--ticker", "ABC", "--no-live"], "results"),
     (["desk", "--ticker", "ABC", "--no-live"], "llm"),
+    (["agents", "--ticker", "ABC", "--start", "2026-01-05", "--end", "2026-02-27"], "results"),
     (["agents", "--ticker", "ABC", "--start", "2026-01-05", "--end", "2026-02-27"], "llm"),
     (["probe", "--ticker", "ABC", "--start", "2026-01-05", "--end", "2026-02-27"], "results"),
+    (["probe", "--ticker", "ABC", "--start", "2026-01-05", "--end", "2026-02-27"], "llm"),
     (["baselines", "--tickers", "ABC"], "results"),
     (["train-ml", "--tickers", "ABC"], "results"),
 ])
@@ -1795,8 +1797,8 @@ def test_same_day_sidecar_for_a_different_download_is_ignored(yahoo, tmp_path):
     sidecar from the evening must not vouch for a midday price file."""
     fetch_latest_prices("ABC", cache_dir=tmp_path, now=AFTER_CLOSE)
     cache = tmp_path / "desk" / "ABC_2015-01-01_latest.parquet"
-    midday = _synthetic_df()
-    midday.iloc[-1, midday.columns.get_loc("close")] *= 0.97     # an intraday reading
+    midday = pd.read_parquet(cache)                              # the very same download...
+    midday.iloc[-1, midday.columns.get_loc("close")] *= 0.97     # ...but an intraday reading
     midday.to_parquet(cache)
     stamp = MIDDAY.timestamp()
     os.utime(cache, (stamp, stamp))
@@ -2029,3 +2031,193 @@ def test_age_at_download_is_counted_on_the_exchange_calendar():
     fresh = build_desk_snapshot("7203.T", live=False, now=a_day_earlier,
                                 prices=_prices(df, a_day_earlier, tokyo_18))
     assert not any("days old" in n for n in fresh.notes)
+
+
+# ---------------------------------------------------------------------------
+# closing check
+# ---------------------------------------------------------------------------
+
+def test_cli_desk_proves_its_own_output_folder_before_it_spends(offline_cli, monkeypatch, capsys):
+    """results/ is writable but results/desk/ is not (left behind by another
+    user, say). The run must stop before the pipeline is paid for."""
+    tmp_path, _, _ = offline_cli
+    out_dir = tmp_path / "results" / "desk"
+    out_dir.mkdir(parents=True)
+    _unwritable(monkeypatch, out_dir)
+    _desk_must_not_run(monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["desk", "--ticker", "ABC", "--no-live"])
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert f"cannot write to {out_dir}" in err and "TRADINGLAB_HOME" in err
+    assert not list(out_dir.iterdir())  # no probe file, no transcript
+
+
+def test_write_probe_gives_up_at_once_where_file_creation_is_denied(monkeypatch, tmp_path, capsys):
+    """On Windows a folder that refuses new files answers every attempt with
+    PermissionError, which older ``tempfile.mkstemp`` reads as a name collision
+    and retries about two billion times. The probe must try exactly once."""
+    folder = tmp_path / "results"
+    folder.mkdir()
+    real_open = os.open
+    attempts = []
+
+    def denied(path, flags, mode=0o777, **kwargs):
+        if os.path.dirname(os.fsdecode(path)) == str(folder):
+            attempts.append(path)
+            assert len(attempts) <= 100, "the probe keeps retrying instead of reporting"
+            raise PermissionError(13, "Permission denied", os.fsdecode(path))
+        return real_open(path, flags, mode, **kwargs)
+
+    monkeypatch.setattr(os, "open", denied)
+    with pytest.raises(SystemExit) as exc:
+        cli._require_writable(folder)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert f"cannot write to {folder}" in err and "TRADINGLAB_HOME" in err
+    assert len(attempts) == 1 and not list(folder.iterdir())
+    assert not hasattr(cli, "tempfile")  # the probe must not go back to mkstemp
+
+
+def test_a_failed_second_look_is_reported_not_swallowed(yahoo, tmp_path):
+    """The first look says "a fetch after 17:40 exchange time settles it". A
+    fetch at 17:42 that Yahoo refuses must not come back identical to the
+    first: the caller has to learn that the download failed and that these
+    are still the earlier prices. Not behind, and the agents' prompt is the
+    same, because the data is."""
+    yahoo["session"] = _session(last_trade=f"{LAST_BAR}T20:55:00+00:00")
+    first_at = pd.Timestamp(f"{LAST_BAR} 21:30", tz="UTC")        # 17:30 New York
+    first = fetch_latest_prices("ABC", cache_dir=tmp_path, now=first_at)
+    before = snapshot_to_dict(build_desk_snapshot("ABC", live=False, now=first_at, prices=first))
+    assert len(before["notes"]) == 1
+    assert "a fetch after 17:40 exchange time settles it" in before["notes"][0]
+
+    yahoo["fail"] = 2
+    again_at = pd.Timestamp(f"{LAST_BAR} 21:42", tz="UTC")        # 17:42: after the time named
+    again = fetch_latest_prices("ABC", cache_dir=tmp_path, now=again_at)
+    assert yahoo["fail"] == 0 and yahoo["downloads"] == 1          # both attempts were refused
+    after = snapshot_to_dict(build_desk_snapshot("ABC", live=False, now=again_at, prices=again))
+
+    # Still the first look: same download, still undecided, not behind.
+    assert after["fetched_at"] == before["fetched_at"] == "2026-03-13T21:30Z"
+    assert after["partial_session"] is None and after["prices_behind"] is False
+    # But the failed attempt is on the record, with how old the prices are.
+    extra = [note for note in after["notes"] if note not in before["notes"]]
+    assert len(extra) == 1, "the failed second look left no trace in the notes"
+    assert "failed" in extra[0] and "12 minutes ago" in extra[0]
+    # It is for the caller only: the agents see exactly what they saw before.
+    assert after["context"] == before["context"]
+
+    # A second look that succeeds carries no such note.
+    third_at = again_at + pd.Timedelta(minutes=1)
+    third = fetch_latest_prices("ABC", cache_dir=tmp_path, now=third_at)
+    assert yahoo["downloads"] == 2
+    settled = build_desk_snapshot("ABC", live=False, now=third_at, prices=third)
+    assert settled.partial_session is False and settled.notes == []
+
+
+def test_notes_do_not_invent_facts_when_yahoo_left_them_out(monkeypatch):
+    df = _synthetic_df()
+    # Unknown instrument type: missing ratios are not "normal for this kind ()".
+    _live(monkeypatch, fundamentals=dict(FULL_FUNDAMENTALS, forward_pe=None))
+    for prices in (_prices(df, AFTER_CLOSE), _prices(df, AFTER_CLOSE, _session(kind=""))):
+        desk = build_desk_snapshot("ABC", now=AFTER_CLOSE, prices=prices)
+        note = next(n for n in desk.notes if "incomplete" in n)
+        assert "rate-limiting" in note and "re-run" in note
+        assert "normal for this kind of instrument" not in note
+    # Unknown trading currency: the statement lines keep their label, but
+    # nothing is compared with "(None)".
+    _live(monkeypatch, fundamentals=dict(FULL_FUNDAMENTALS, financial_currency="EUR"))
+    for prices in (_prices(df, AFTER_CLOSE), _prices(df, AFTER_CLOSE, _session())):
+        desk = build_desk_snapshot("ABC", now=AFTER_CLOSE, prices=prices)
+        assert "Quarterly revenue (EUR, newest first)" in desk.snapshot.fundamentals
+        assert desk.notes == [] and desk.snapshot.data_notes is None
+    # Unknown statement currency beside a known trading currency: no note.
+    _live(monkeypatch)
+    for currency, expected in (("USD", []), ("JPY", ["Prices are quoted in JPY."])):
+        desk = build_desk_snapshot(
+            "ABC", now=AFTER_CLOSE, prices=_prices(df, AFTER_CLOSE, _session(currency=currency)))
+        assert desk.notes == expected
+        assert "reports its statements" not in desk.snapshot.context_block()
+
+
+@pytest.mark.parametrize("column", ["close", "volume"])
+def test_sidecar_is_ignored_when_one_field_of_the_last_bar_differs(yahoo, tmp_path, column):
+    """Two readings of the same unfinished bar can differ in the price alone
+    or in the volume alone."""
+    fetch_latest_prices("ABC", cache_dir=tmp_path, now=AFTER_CLOSE)
+    cache = tmp_path / "desk" / "ABC_2015-01-01_latest.parquet"
+    sidecar = tmp_path / "desk" / "ABC_2015-01-01_latest.meta.json"
+    midday = pd.read_parquet(cache)                           # the very same download...
+    midday.iloc[-1, midday.columns.get_loc(column)] *= 0.97   # ...but for one field
+    midday.to_parquet(cache)
+    stamp = MIDDAY.timestamp()
+    os.utime(cache, (stamp, stamp))
+    got = desk_mod._read_cached_prices(cache, sidecar)
+    assert got.session is None and got.downloaded_at == MIDDAY.tz_convert("UTC")
+
+
+def test_fetcher_reads_the_statement_currency_from_yahoo(monkeypatch):
+    """Yahoo's key is ``financialCurrency``, not the quote's ``currency``."""
+    info = {"trailingPE": 12.0, "currency": "GBp", "financialCurrency": "USD"}
+
+    class FakeTicker:
+        quarterly_income_stmt = None
+
+        def __init__(self, ticker):
+            self.info = info
+
+    monkeypatch.setattr(fundamentals_mod.yf, "Ticker", FakeTicker)
+    assert fundamentals_mod.fetch_fundamentals_snapshot("SHEL.L")["financial_currency"] == "USD"
+    info["financialCurrency"] = 840      # not text: no label rather than a wrong one
+    assert fundamentals_mod.fetch_fundamentals_snapshot("SHEL.L")["financial_currency"] is None
+    del info["financialCurrency"]
+    snapshot = fundamentals_mod.fetch_fundamentals_snapshot("SHEL.L")
+    assert snapshot["available"] is True and snapshot["financial_currency"] is None
+
+
+@pytest.mark.parametrize("quoted,unit,major", [
+    ("GBp", "pence", "GBP"), ("GBX", "pence", "GBP"),
+    ("ZAc", "cents", "ZAR"), ("ILA", "agorot", "ILS"),
+])
+def test_every_minor_unit_is_spelled_out_and_compared_as_its_major(monkeypatch, quoted, unit,
+                                                                  major):
+    df = _synthetic_df()
+    prices = _prices(df, AFTER_CLOSE, _session(currency=quoted))
+    priced = f"Prices are quoted in {quoted} ({unit}, 1/100 of {major})."
+    _live(monkeypatch, fundamentals=dict(FULL_FUNDAMENTALS, financial_currency=major))
+    same = build_desk_snapshot("ABC", now=AFTER_CLOSE, prices=prices)
+    assert same.notes == [priced]       # statements in the major unit: no mismatch
+    _live(monkeypatch, fundamentals=dict(FULL_FUNDAMENTALS, financial_currency="USD"))
+    mixed = build_desk_snapshot("ABC", now=AFTER_CLOSE, prices=prices)
+    assert priced in mixed.notes
+    assert any(f"in USD, not in the currency the shares trade in ({major})" in n
+               for n in mixed.notes)
+
+
+def test_old_bar_note_keeps_both_readings():
+    """Six to twelve days is a holiday OR a halt; the note must say both."""
+    df = _synthetic_df()
+    now = _ny("12:00") + pd.Timedelta(days=8)
+    desk = build_desk_snapshot("ABC", live=False, df=df, now=now)
+    note = next(n for n in desk.notes if "8 days old" in n)
+    assert "long exchange holiday" in note and "otherwise the symbol may be halted" in note
+
+
+def test_statement_currency_note_says_which_figures_it_covers(monkeypatch):
+    _live(monkeypatch, fundamentals=dict(FULL_FUNDAMENTALS, financial_currency="TWD"))
+    desk = build_desk_snapshot("TSM", now=AFTER_CLOSE,
+                               prices=_prices(_synthetic_df(), AFTER_CLOSE,
+                                              _session(currency="USD")))
+    note = next(n for n in desk.notes if "reports its statements" in n)
+    assert note.endswith("Revenue and net income are in the statement currency.")
+    assert note in desk.snapshot.context_block()
+
+
+def test_incomplete_equity_fundamentals_name_both_innocent_and_rate_limit_causes(monkeypatch):
+    _live(monkeypatch, fundamentals=dict(FULL_FUNDAMENTALS, forward_pe=None))
+    desk = build_desk_snapshot("ABC", now=AFTER_CLOSE,
+                               prices=_prices(_synthetic_df(), AFTER_CLOSE, _session()))
+    note = next(n for n in desk.notes if "incomplete" in n)
+    assert "Some foreign listings lack these fields; otherwise Yahoo is probably " \
+           "rate-limiting" in note

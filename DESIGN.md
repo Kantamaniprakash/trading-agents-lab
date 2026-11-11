@@ -469,8 +469,9 @@ def render_decision_card(log, desk) -> str
   ignored, so neither an interrupted run nor a failed cache write can leave prices judged
   by another download's time and calendar. A download whose session state came out
   undecided is not reused from the 15-minute window: a second look is what settles it.
-  If that second look fails, the first is returned as it was (minutes old, still
-  undecided), not flagged as behind. Cache writes are best-effort: an unwritable
+  If that second look fails, the first is returned (minutes old, still undecided), not
+  flagged as behind, with `recheck_failed` set so the caller is told the attempt failed.
+  That note goes to the caller only: the data, and so the prompt, are unchanged. Cache writes are best-effort: an unwritable
   directory costs the cache, not the run.
 - **Session state uses the exchange's own clock.** Yahoo dates a daily bar by the
   exchange's local day and includes the session in progress. `_fetch_session_info` reads
@@ -546,7 +547,9 @@ argparse with subcommands (all print readable tables and save CSV/PNG to results
   print.
 - Write checks: for the commands whose product is a file (`baselines`, `train-ml`,
   `agents`, `probe`, `desk`) `main()` proves `results/` is writable by really creating a
-  file there (`mkdir(exist_ok=True)` succeeds on a read-only folder), and for the three
+  file there under a name of its own (`mkdir(exist_ok=True)` succeeds on a read-only
+  folder; `tempfile.mkstemp` is avoided because older Pythons on Windows retry "access
+  denied" about two billion times), and for the three
   that call the API the LLM cache too, and exits with one `error:` line naming
   `TRADINGLAB_HOME` otherwise, before any work or spend. `download` checks its cache
   folder the same way, since the cache is its whole product. `snapshot` and `report` need

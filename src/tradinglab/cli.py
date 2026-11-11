@@ -18,8 +18,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import sys
-import tempfile
 from pathlib import Path
 
 import matplotlib
@@ -486,10 +486,12 @@ def _require_writable(directory: Path) -> None:
     try:
         directory.mkdir(parents=True, exist_ok=True)
         # A name of its own, so two runs starting together cannot trip over
-        # each other's probe.
-        handle, name = tempfile.mkstemp(prefix=".write-test-", dir=directory)
-        os.close(handle)
-        os.unlink(name)
+        # each other's probe. Not tempfile.mkstemp: on Windows, older Pythons
+        # take "access denied" for a name collision and try again os.TMP_MAX
+        # (2**31 - 1) times instead of raising.
+        probe = directory / f".write-test-{os.getpid()}-{secrets.token_hex(8)}"
+        os.close(os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        os.unlink(probe)
     except OSError as exc:
         _exit_unwritable(directory, exc)
 
