@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `cli snapshot` and `cli desk`: London and Frankfurt shares were reported as "one session
+  behind" for many hours after every close, because Yahoo's daily row for the finished
+  session had no close yet and was dropped. The desk now completes that bar with Yahoo's
+  own last regular-market price and says so in a data note (in `notes` and in the
+  prompt). It does this only for the newest row, when the price was traded on that row's
+  date, the session is over by the same rules that label an unfinished bar, the price
+  lies within the row's low-to-high range, and the instrument is not a cryptocurrency;
+  otherwise the snapshot is flagged `prices_behind` exactly as before. Reading that row
+  costs one extra Yahoo request, made only when the newest session is missing. Around a
+  dividend the row is not filled, nor when Yahoo sent an empty row for a session between
+  the last complete bar and that row. Backtests and every other command read prices
+  as before.
+
 ## [0.2.0] - 2026-11-10
 
 ### Added
@@ -86,5 +102,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   markdown transcripts for explainability, and a 62-test pytest suite including no-lookahead
   perturbation tests.
 
+[Unreleased]: https://github.com/Kantamaniprakash/trading-agents-lab/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/Kantamaniprakash/trading-agents-lab/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Kantamaniprakash/trading-agents-lab/releases/tag/v0.1.0

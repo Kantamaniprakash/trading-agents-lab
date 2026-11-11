@@ -186,6 +186,14 @@ The rule on this path is that a data problem is never analysed silently:
   still has most of an hour to run. That lasts up to 15 minutes when the quote feed is
   delayed, and, for a thinly traded symbol, for as long as its latest trade sits in the
   15 minutes after the calendar's close.
+- **A late close is filled, and labelled.** For London and Frankfurt shares Yahoo's
+  daily row has no close for many hours after the session ends. The desk then uses
+  Yahoo's own last regular-market price as that bar's close and says so in a note, but
+  only when the price was traded on that day, the session is over, and the price lies
+  within the day's low-to-high range. It is never done for crypto or for an unfinished
+  session, and not around a dividend; in those cases, and whenever a check
+  fails, the snapshot is flagged `prices_behind` instead. The close Yahoo publishes
+  later can differ slightly from the filled one. Backtests never see a filled bar.
 - **Gaps are named.** An old bar (noted after 5 days, called stale after 12, which is
   longer than any scheduled exchange closure), a non-dollar price currency (pence and
   cents spelled out), statements reported in a different currency from the share price,
@@ -360,7 +368,7 @@ Findings a 3-month backtest could never show:
 
 ## Verification
 
-- 326 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
+- 373 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
   future rows → assert all earlier features/indicators/engine outputs are bit-identical).
 - A five-dimension adversarial review pass (lookahead, statistics, costs, data hygiene,
   prompt leakage — every finding independently re-verified before acceptance) surfaced
