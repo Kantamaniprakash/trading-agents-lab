@@ -21,6 +21,42 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
       - run: uv sync --locked
+      # tests/ includes tests/skill_v2: the shipped scripts, the skill text and the package.
       - run: uv run pytest tests/ -q
+      - name: Skill stamps, lint and preflight
+        run: uv run python skill/build_skill.py --check
       - name: Security audit (non-blocking)
         run: uv run --with pip-audit pip-audit || true
+
+  # The skill's scripts promise the standard library only, on Python 3.9 or newer, on any
+  # system. This job holds them to it: no package, no uv, nothing added but pytest.
+  skill-scripts:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # The oldest the skill promises, the newest the listing calls tested, and the two
+        # releases after it, which a fresh install gives today.
+        python-version: ["3.9", "3.13", "3.14", "3.15"]
+        # The newest Ubuntu image has no Python 3.9 build, so that leg runs on the one before.
+        exclude:
+          - os: ubuntu-latest
+            python-version: "3.9"
+        include:
+          - os: ubuntu-24.04
+            python-version: "3.9"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # The preflight checks the stamp of each of the four scripts and runs the indicator
+      # known-answer test on this Python and this system. It prints the files it checked.
+      - name: Preflight on the committed scripts
+        run: python skill/trading-agents-desk/scripts/brief.py --preflight skill/trading-agents-desk/scripts
+      - run: python -m pip install pytest
+      # Data (a stand-in for the network), brief, report, --verify and page, on generated numbers.
+      - run: python -m pytest tests/skill_v2/test_portable.py -q -p no:cacheprovider
+      - name: The same flow as a plain script, without pytest
+        run: python tests/skill_v2/test_portable.py
