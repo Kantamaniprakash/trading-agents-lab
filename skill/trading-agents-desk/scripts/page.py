@@ -7,15 +7,15 @@ import re
 import sys
 
 VERSION = "2.0.0"
-SELF = "1c1a2d3218a1"
+SELF = "e9303bbf9c12"
 SWING = ("oversold", "overbought")
-# Meter range, the two convention thresholds, and the words for a value outside them.
+# Meter range, both thresholds, and the words for a value outside them.
 SCALES = {
   "rsi14": (0, 100, 30, 70, SWING), "stoch_k": (0, 100, 20, 80, SWING),
   "mfi14": (0, 100, 20, 80, SWING),
   "bb_pctb": (-0.5, 1.5, 0, 1, ("under lower band", "over upper band")),
   "adx14": (0, 100, 20, 25, ("weak trend", "strong trend"))}
-# Statement figures in the order the tiles prefer. The first eight that exist are shown.
+# Statement figures by preference: the first eight that exist are shown.
 TILES = (
   "pe_trailing pe_forward peg mcap margin_ttm rev_q_yoy ni_q_yoy debt_equity rev_ttm ni_ttm "
   "rev_q ni_q debt equity").split()
@@ -24,8 +24,8 @@ LINES = (
   ("sma200", "sma200", "#1baf7a", "200d"), ("sma50", "sma50", "#eb6834", "50d"),
   ("close", "last", "#2a78d6", ""))
 MONTHS = " Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ")
-# Classes: s2 s3 s4 = columns of six that a card spans, col = a stack of cards,
-# wide = not shown on a phone.
+# Classes: s2 s3 s4 = columns of six that a card spans, col = a stack of cards, wide = not
+# on a phone.
 CSS = """*{box-sizing:border-box;margin:0}
 body{font:14px/1.5 system-ui,sans-serif;background:#f2f3ee;
 color:#0f1f38;padding:12px;overflow-wrap:anywhere}
@@ -66,8 +66,8 @@ text{font-size:11px;fill:#5a6679}.el,.lt,.lp{fill:#0f1f38;font-weight:600}
 .m rect{fill:#e3e8ee}.m line{stroke:#fff;stroke-width:2}.m circle,.ld circle{fill:#0f1f38}
 dl{display:grid;gap:16px 24px;
 grid-template-columns:repeat(auto-fit,minmax(min(var(--m,180px),100%),1fr))}
-.in dl{--m:60px;border-top:1px solid #e6e9ed;padding-top:14px;gap:8px}.in dd{font-size:15px}
-.in dl,.s3 dl{margin-top:auto}
+.in dl{--m:72px;border-top:1px solid #e6e9ed;padding-top:14px;gap:8px}
+.in dd{font-size:15px;white-space:nowrap}.in dl,.s3 dl{margin-top:auto}
 ul{list-style:none;padding:0}li{padding:3px 0}.hl li{padding:10px 0}
 li:first-child{padding-top:0}li+li,td,.fu div{border-top:1px solid #e6e9ed}
 .ev{margin-bottom:16px}.ev li{display:flex;justify-content:space-between;gap:16px;padding:7px 0}
@@ -76,7 +76,7 @@ h2 b{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(
 margin-right:8px}.bull{--a:#0f7b6c}.bear{--a:#b4432e}
 .ax{stroke:#5a6679}.lp{font-size:12.5px}
 table{width:100%;border-spacing:0;margin-top:6px}td,th{padding:9px 0;vertical-align:top}
-td+td,th+th{text-align:right;white-space:nowrap;padding-left:18px;max-width:9em;overflow:hidden;
+td+td,th+th{text-align:right;white-space:nowrap;padding-left:18px;max-width:10em;overflow:hidden;
 text-overflow:ellipsis}td+td{font-weight:600}
 h2+small{margin:-6px 0 14px}
 .fu{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
@@ -94,8 +94,9 @@ grid-auto-rows:auto auto 1fr;gap:0 18px;flex:1}
 
 
 def esc(s, cut=None):
-  """One input string as safe HTML text, cut to `cut` characters when given."""
-  return html.escape(re.sub(r"[\0-\x1f\x7f]", " ", str(s)[:cut]))
+  """A string as safe HTML text, cut to `cut` characters. A date stays on one line."""
+  text = html.escape(re.sub(r"[\0-\x1f\x7f]", " ", str(s)[:cut]))
+  return re.sub(r"(?<=\d)-(?=\d)", "&#8209;", text)
 
 
 def card(css, title, body):
@@ -116,14 +117,14 @@ def chart(brief, levels, word, unit):
   dates = series["date"]
   count = len(dates)
 
-  # The price axis runs in round steps around everything that is drawn.
+  # The price axis runs in round steps around all that is drawn.
   prices = [level["price"] for level in levels]
   for key, name, colour, short in LINES:
     prices += [v for v in series[key] if v is not None]
   lo, hi = min(prices), max(prices)
   size = hi - lo or abs(hi) or 1
   step = 10 ** math.floor(math.log10(size / 4))
-  step *= next(m for m in (1, 2, 5, 10) if size / step / m <= 5)
+  step *= next(m for m in (1, 2, 2.5, 5, 10) if size / step / m <= 5)
   lo = math.floor(lo / step) * step
   hi = max(math.ceil(hi / step) * step, lo + step)
 
@@ -134,13 +135,13 @@ def chart(brief, levels, word, unit):
   out = '<svg role=img aria-label="Daily prices, averages and levels">'
   tick_chars = 1
   for i in range(round((hi - lo) / step) + 1):
-    # Plain decimals with no zeros at the end, never exponent notation.
+    # Plain decimals, no zeros at the end, no exponent.
     label = ("%.10f" % (lo + i * step)).rstrip("0").rstrip(".")
     tick_chars = max(tick_chars, len(label))
     y = y_of(lo + i * step)
     out += ("<line class=g x2=100%% y1=%.2f%% y2=%.2f%% /><text x=-7 y=%.2f%% dy=4 "
       "text-anchor=end>%s</text>" % (y, y, y, label))
-  # A month name where the month changes, unless the name before it is too close.
+  # A month name where the month changes, unless the last name is too close.
   named = -count
   for i in range(1, count):
     month = dates[i][5:7]
@@ -149,8 +150,8 @@ def chart(brief, levels, word, unit):
       out += "<text x=%.1f%% y=100%% dy=16>%s</text>" % (
         i * 100 / (count - 1), MONTHS[int(month)])
 
-  # The lines sit in a box of their own that stretches with the card. The close comes
-  # last, and the area under it is tinted.
+  # The lines sit in their own box, which stretches with the card. The close comes last,
+  # and the area under it is tinted.
   out += '<svg height=100%% viewBox="0 0 %d 100" preserveAspectRatio=none>' % (count - 1)
   ends = []
   for key, name, colour, short in LINES:
@@ -161,27 +162,26 @@ def chart(brief, levels, word, unit):
       ends.append((y_of(series[key][-1]), colour, label))
   out += '<path class=fl d="M%sV88H0Z"/></svg>' % "L".join(points)
 
-  # A level is a dashed line with its price and, on a wide screen, its name. The label
-  # starts with the line, so no dash reads as a minus. A label that would sit on the one
-  # above it moves down.
+  # A level is a dashed line with its price and, on a wide screen, its name. The top label
+  # sits above its line and the bottom one below it, so close levels keep their own.
   tags = ""
-  spot = -9
-  for level in sorted(levels, key=lambda level: -level["price"]):
+  rows = sorted(levels, key=lambda level: -level["price"])
+  for i, level in enumerate(rows):
     y = y_of(level["price"])
-    spot = max(y, spot + 6)
+    dy = 4 if 0 < i < len(rows) - 1 or len(rows) == 1 else 16 if i else -8
     out += "<line class=lv x2=100%% y1=%.2f%% y2=%.2f%% />" % (y, y)
-    tags += "<text class=lt x=0 y=%.2f%% dy=4>%s<tspan class=wide> &#183; %s</tspan></text>" % (
-      spot, esc(level["price_t"], 13), esc(level["label"], 44))
+    tags += "<text class=lt x=0 y=%.2f%% dy=%d>%s<tspan class=wide> &#183; %s</tspan></text>" % (
+      y, dy, esc(level["price_t"], 13), esc(level["label"], 44))
   out += tags
-  # A dot where each line ends, and a label that moves down in the same way.
+  # A dot where each line ends. A label that would sit on the one above moves down.
   spot = -9
   for y, colour, label in sorted(ends):
     spot = max(y, spot + 6)
     out += ("<circle cx=100%% cy=%.2f%% r=4 fill=%s /><text class=el x=100%% dx=9 y=%.2f%% "
       "dy=4>%s</text>" % (y, colour, spot, esc(label)))
-  # Room at the left for the axis numbers and at the right for the end labels.
-  return ("<small>%d daily %ss in %s, %s to %s. 50d and 200d are the 50-day and 200-day "
-    "averages. Dashed lines are the report's levels.</small>"
+  # Room at the left for the axis numbers, at the right for the end labels.
+  return ("<small>%d daily %ss in %s, %s to %s. 50d and 200d: the 50-day and 200-day averages. "
+    "Dashed lines: the report's levels.</small>"
     '<div class=ch style="padding:0 %dpx 22px %dpx">%s</svg></div>' % (
       count, word, unit, esc(dates[0]), esc(dates[-1]),
       16 + 6.4 * max(len(end[2]) for end in ends), 12 + 6.4 * tick_chars, out))
@@ -190,13 +190,13 @@ def chart(brief, levels, word, unit):
 def meter(fact, lo, hi, under, over, words):
   """One indicator on its real scale: the thresholds as gaps, the value as a dot."""
   value = fact["v"]
-  # A value outside the usual range widens the scale, so the dot stays on the track.
+  # A value outside the usual range widens the scale: the dot stays on the track.
   lo, hi = min(lo, value), max(hi, value)
 
   def at(x):
     return (x - lo) * 100 / (hi - lo)
 
-  # The words go by the two decimals the reader sees.
+  # The words go by the two decimals shown.
   state = "between %g and %g" % (under, over)
   if round(value, 2) < under:
     state = "below %g &#183; %s" % (under, words[0])
@@ -218,7 +218,7 @@ def indicators(facts):
   for days in (1, 5, 21, 63):
     fact = facts.get("ret%d" % days)
     if fact:
-      # Red and green only repeat the sign that the text already shows.
+      # Red and green only repeat the sign the text shows.
       css = "dn" if "-" in fact["t"] else "up"
       returns.append(("%d day%s" % (days, "s" * (days > 1)),
         "<b class=%s>%s</b>" % (css, esc(fact["t"]))))
@@ -229,7 +229,7 @@ def indicators(facts):
 
 
 def case(side, part):
-  """The bull or the bear card. Both are built the same way and get the same room."""
+  """The bull or the bear card: both built the same way, with the same room."""
   evidence = ["<span>%s</span><b>%s</b>" % (esc(x["label"]), esc(x["text"]))
     for x in part["evidence"]]
   return card("s3 " + side, "<b></b>The %s case" % side,
@@ -244,11 +244,11 @@ def change(levels, last, last_words):
   lo = min(prices)
   size = max(prices) - lo or 1
   marks = ""
-  table = "<table><tr><th>Level</th><th>Price</th><th>From last</th></tr>"
+  table = "<table><tr><th>Level</th><th>Price</th><th>To reach it</th></tr>"
   for row, level in enumerate(levels):
     x = 5 + (level["price"] - lo) * 90 / size
-    # Each label has a row of its own, so no two collide. It starts at its mark in the left
-    # half of the line and ends there in the right half.
+    # Each label has its own row. In the left half it starts at its mark, in the right half
+    # it ends there.
     marks += ("<line class=ax x1=%.1f%% x2=%.1f%% y1=29 y2=43 /><text class=lp x=%.1f%% y=%d "
       "text-anchor=%s>%s &#183; %s</text>" % (
         x, x, x, 60 + 20 * row, "start" if x < 50 else "end", esc(level["price_t"], 12),
@@ -257,7 +257,7 @@ def change(levels, last, last_words):
       "<td>%s</td></tr>" % tuple(
         esc(level[k]) for k in ("label", "side", "words", "price_t", "gap_t")))
   x = 5 + (last - lo) * 90 / size
-  # The last price sits above the line, centred on its dot where there is room.
+  # The last price sits above the line, centred on its dot if there is room.
   half = 1.1 * len(last_words)
   anchor = "start" if x < half else "end" if x + half > 100 else "middle"
   return card("cv", "What would change this view",
@@ -298,12 +298,11 @@ def build(brief, report):
     day, esc(brief["session"]))
   if "prices_behind" in brief["flags"]:
     view += " (the data source is behind)"
-  # A price file was not downloaded, so it has no fetch time.
+  # A price file has no fetch time.
   origin = "Data fetched " + esc(brief["fetched_at"])
   if brief["source"] == "price-file":
     origin = "Prices from a file"
   tiles = ""
-  # The same plain tiles for every outcome.
   for tile in (
       ("The argument", esc(report["argument"]["text"]), "Bull against Bear"),
       ("The paper desk", esc(report["desk"]["text"]),
@@ -315,12 +314,13 @@ def build(brief, report):
   out = ("<!doctype html><html lang=en><meta charset=utf-8>"
     '<meta name=viewport content="width=device-width,initial-scale=1">'
     "<title>%s desk view</title><style>%s</style><main><header><h2>Trading Agents Desk</h2>"
-    "<h1>%s <i>%s</i></h1><p>Desk view %s &#183; Last %s %s %s &#183; %s</p>"
+    "<h1>%s <i>%s</i></h1><p>Desk view %s &#183; Last %s %s %s &#183; %s</p><small>Research "
+    "simulation, not advice. This desk design lost to buy-and-hold in its only test.</small>"
     "<div class=t>%s</div></header><p class=why><b>Why</b>%s</p>" % (
       esc(brief["symbol"]), CSS, esc(brief["symbol"]), esc(brief["name"]), view, word,
       esc(last["t"]), unit, origin, tiles, esc(report["why"])))
   if brief["flags"]:
-    # A notice in plain words, not styled as an error.
+    # A notice in plain words, not an error.
     strip = notes or [esc(flag).replace("_", " ") for flag in brief["flags"]]
     out += "<aside><b>Data notes</b>%s</aside>" % bullets(strip)
   out += card("s4", "Price", chart(brief, report["levels"], word, unit)) + indicators(facts)
@@ -350,10 +350,10 @@ def build(brief, report):
 
 
 def digest(path):
-  """The contract's hash of a script: its bytes without the stamp line, 12 hex digits."""
+  """The contract's script hash: its bytes, the stamp line as SELF, 12 hex digits."""
   with open(path, "rb") as f:
     lines = [line.rstrip() for line in f.read().splitlines()]
-  kept = [line for line in lines if not re.fullmatch(b'SELF = "[0-9a-f]{12}"', line)]
+  kept = [re.sub(b'^SELF = "[0-9a-f]{12}"$', b"SELF", line) for line in lines]
   return hashlib.sha256(b"\n".join(kept).rstrip()).hexdigest()[:12]
 
 

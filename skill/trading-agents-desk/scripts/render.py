@@ -6,8 +6,8 @@ import re
 import sys
 
 VERSION = "2.0.0"
-SELF = "490116451cec"
-KAT = "a91530a430a0"
+SELF = "ccbce85fbf5b"
+KAT = "8b50ab54085a"
 USAGE = "usage: render.py BRIEF DRAFT OUT_MD OUT_REPORT [--attempt N] | --verify BRIEF OUT_MD"
 E_BRIEF = "STOP E_BRIEF the brief is not a brief.v1 document; build it again with brief.py"
 E_SELF = "ERROR E_SELF this copy of render.py is damaged; load the skill files again"
@@ -38,19 +38,20 @@ REF = re.compile(r"\{\{(.*?)\}\}")
 TAIL = re.compile(r"(?:[\s:=(,]|\b(?:of|at|is|was|near|around|about|reads?|reading)\b)*$")
 PHRASE = re.compile(
   r"\b(?:you should|(?:i|we) recommend|price target|guarantee[ds]?|risk[- ]free|"
-  r"will (?:rise|fall|rally|drop|rebound)|strong (?:buy|sell)|beat the market|"
+  r"will (?:rise|fall|rally|drop|rebound)|strong (?:buy|sell)(?!-)|beat the market|"
   r"your (?:position|portfolio|shares|holdings)|stop[- ]loss at|take[- ]profit|sure thing|"
   r"can(?:.|no)t lose|certain to|(?:buy|sell) now|must (?:buy|sell))\b", re.I)
 # Numbers in words are quantity words too.
 N = ("(?:zero|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\\w+teen|dozen|"
-  "(?:twen|thir|for|fif|six|seven|eigh|nine)ty|hundred|thousand|\\w+illion)s?")
+  "(?:twen|thir|for|fif|six|seven|eigh|nine)t(?:y|ie)|hundred|thousand|\\w+illion)s?")
 QTY = re.compile(
   r"\b(?:hal(?:f|ves?|ved)|thirds?|quarters?|(?:doubl|tripl|quadrupl)(?:e[ds]?|ing)|twice|"
   r"\w+-fold|%s(?:fold)?)\b" % N, re.I)
 # "close" said of the newest price; references appear here as <name>.
 NOTE = re.compile(
-  r"\b(?:last|latest|today's)\s+clos(?:e|ing)\b|\bclos(?:e[ds]?|ing)"
-  r"(?:\s+(?:price|of|at|is|was))*\W*<\s*(?:last|close\.0|chg1|chg\.0|ret1|\w+_gap)\b", re.I)
+  r"\b(?:last|latest|today's)\s+clos(?:e|ing)\b|(?<!previous )\bclos(?:e[ds]?|ing)"
+  r"(?:\s+(?:price|of|at|is|was|up|down|lower|higher))*\W*"
+  r"<\s*(?:last|close\.0|chg1|chg\.0|ret1|\w+_gap)\b|(?:last|chg1)\S*> at the clos", re.I)
 RECEIPT = re.compile(
   r"- Figures: (\d+) .*\n- Data (\S+) to (\S+), (\w+)\. Report (\w{8})\. Attempt ")
 
@@ -80,7 +81,6 @@ def esc(s):
 
 
 def near(x, names):
-  # The three names nearest in letters.
   return ", ".join(sorted(names, key=lambda n: (len(set(x.lower()) ^ set(n.lower())), n))[:3])
 
 
@@ -171,7 +171,7 @@ def markdown(b, m):
     table(["", "Bull", "Bear"], [
       ["**%s**" % name, cell("bull", key), cell("bear", key)] for name, key in ROWS]),
     "**What would change this view**",
-    table(["Level", "Price", "From last " + px[-5:], "Would support"], [
+    table(["Level", "Price", "To reach it", "Would support"], [
       [esc(x["label"]), esc(x["price_t"]), x["gap_t"],
         "%s, %s" % (x["side"].capitalize(), esc(x["words"]))] for x in m["levels"]]),
     "**Risk review.** " + esc(m["risk"]),
@@ -188,9 +188,7 @@ def markdown(b, m):
 
 
 def desk(b, draft, attempt=1):
-  """Check the draft against the brief. Returns (report.v1 or None, lines to fix).
-
-  Every text in the report is plain: what the reader of the Markdown sees, with no escapes."""
+  """Check the draft against the brief. Returns (report.v1 or None, lines to fix)."""
   F = b["facts"]
   H = dict((h["id"], h) for h in b["headlines"])
   # qty counts quantity words; used holds the ids of quoted headlines, in order of first use.
@@ -223,7 +221,8 @@ def desk(b, draft, attempt=1):
     lab = TAIL.sub("", before.lower())
     hit = max((x for x in own if lab.endswith(x) and not lab[:-len(x)][-1:].isalnum()),
       key=len, default="")
-    if hit and name not in own[hit] and F[name]["v"] not in [F[k]["v"] for k in own[hit]]:
+    if (hit and (fmt != "label" or hit in ALIAS) and name not in own[hit]
+        and F[name]["v"] not in [F[k]["v"] for k in own[hit]]):
       fix(slot, "D_LABEL", '"%s" labels another fact, not %s' % (hit, name),
         ", ".join(sorted(own[hit])[:3]) or "another fact")
     fm = forms(b, name)
@@ -245,7 +244,8 @@ def desk(b, draft, attempt=1):
       fix(slot, "D_PHRASE", '"%s" is advice, certainty or personal wording' % m.group(),
         "say what the evidence shows")
     if b["session"] != "finished" and NOTE.search(REF.sub(r"<\1>", text)):
-      fix(slot, "D_NOTE", 'the session may be unfinished: say "last price", not "close"', "last")
+      fix(slot, "D_NOTE", 'the session may be unfinished: say "the price", not "close"',
+        "the price")
     qty[0] += len(QTY.findall(bare))
     p = REF.split(text)
     return plain("".join(ref(slot, x, p[i - 1]) if i % 2 else x for i, x in enumerate(p)))
@@ -395,9 +395,9 @@ def read(path, raw=False):
 
 
 def run(a, safe):
-  # Hashed as bytes, without the one stamp line.
+  # Hashed as bytes, the stamp line as the word SELF.
   t = [x.rstrip() for x in read(__file__, 1).splitlines()]
-  t = b"\n".join(x for x in t if not re.fullmatch(b'SELF = "[0-9a-f]{12}"', x)).rstrip()
+  t = b"\n".join(re.sub(b'^SELF = "[0-9a-f]{12}"$', b"SELF", x) for x in t).rstrip()
   if SELF not in ("0" * 12, hashlib.sha256(t).hexdigest()[:12]):
     raise Stop(3, E_SELF)
   if SELF == "0" * 12:

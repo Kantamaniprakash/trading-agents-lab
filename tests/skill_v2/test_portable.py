@@ -8,7 +8,8 @@ It needs no package, no pandas, no network and no pytest fixture, so it runs on 
 3.9 up on Linux, macOS and Windows. The scripts are run the way the skill runs them: as
 separate processes, from a temporary folder they were copied into. The one exception is the
 download: get_data.py is loaded from that folder and its single HTTP function is replaced by a
-stand-in that answers in the data source's shapes, so nothing here opens a connection.
+stand-in that answers in the data source's shapes, so nothing here opens a connection. Its
+clock is replaced as well: the pause after a rate limit is written down and not waited.
 
 Every number is generated here. What a report and a page must say is worked out below from
 the brief's facts and the draft, with plain arithmetic and plain string formatting, not with
@@ -71,6 +72,8 @@ TILES = ("pe_trailing pe_forward peg mcap margin_ttm rev_q_yoy ni_q_yoy debt_equ
          "ni_ttm rev_q ni_q debt equity").split()
 DOT = " &#183; "  # between parts of a Markdown line
 MID = chr(183)    # the same dot once a page is read back
+# The hyphen page.py writes between two digits, so that a date never breaks across two lines.
+NB_HYPHEN = chr(8209)
 REF = re.compile(r"\{\{(.*?)\}\}")
 QUANTITY = re.compile(r"\b(half|halves|double|twice|thirds?|quarters?)\b", re.I)
 # One printable character that Python source can hold almost anywhere.
@@ -409,7 +412,7 @@ def expected_markdown(brief, want, receipt):
         table(["", "Bull", "Bear"], [["**%s**" % title, cell("bull", key), cell("bear", key)]
                                      for title, key in rows]),
         "**What would change this view**",
-        table(["Level", "Price", "From last " + word[-5:], "Would support"], [
+        table(["Level", "Price", "To reach it", "Would support"], [
             [md(x["label"]), md(x["price_t"]), x["gap_t"],
              "%s, %s" % (x["side"].capitalize(), md(x["words"]))] for x in want["levels"]]),
         "**Risk review.** " + md(want["risk"]),
@@ -452,8 +455,10 @@ class Node:
         return "".join(kid if isinstance(kid, str) else kid.raw() for kid in self.kids)
 
     def text(self):
-        """All the text below this node, with runs of white space made one space."""
-        return " ".join(self.raw().split())
+        """All the text below this node as the brief and the report hold it: runs of white
+        space made one space, and the page's non-breaking hyphens made plain again. check_page
+        holds the file itself to the non-breaking one."""
+        return " ".join(self.raw().split()).replace(NB_HYPHEN, "-")
 
 
 class Tree(HTMLParser):
@@ -490,15 +495,40 @@ class Tree(HTMLParser):
         self.problems.append("a comment")
 
 
-def check_page(brief, doc, page):
+def on_page(text):
+    """A text of the brief or the report as the page's file holds it: made safe for HTML,
+    and with the hyphen between two digits written as the non-breaking one."""
+    return re.sub(r"(?<=\d)-(?=\d)", "&#8209;", html.escape(str(text)))
+
+
+def level_offsets(count):
+    """Where the chart's level labels stand against their lines, from the highest price down:
+    the top one above its line, the bottom one below it, any other on its line. One level
+    alone is on its line."""
+    if count < 2:
+        return [4] * count
+    return [-8] + [4] * (count - 2) + [16]
+
+
+def check_page(brief, doc, page, said=LOST):
     """The page against the two files it was drawn from.
 
     Each text on the page that holds a digit is compared here with the brief's text for that
     fact or with the resolved report. At the end nothing with a digit may be left over, so a
-    figure that page.py made up, moved or reformatted cannot pass.
+    figure that page.py made up, moved or reformatted cannot pass. ``said`` is the sentence
+    the Markdown report prints under its first line; the header carries the same one.
     """
     assert page.startswith("<!doctype html>") and page.endswith("</main></html>\n")
     assert all(31 < ord(c) < 127 or c == "\n" for c in page)
+    # No date can break across two lines: below the style sheet a hyphen between two digits
+    # is the non-breaking one, written as a character reference, and that reference stands
+    # nowhere else. The texts are compared further down with those hyphens made plain again,
+    # so a text that compares equal there is the same text.
+    body = page.split("</style>", 1)[1]
+    assert not re.search(r"\d-\d", body), re.search(r".{0,20}\d-\d.{0,20}", body).group()
+    assert not re.search(r"(?<!\d)&#8209;|&#8209;(?!\d)", body)
+    for date in (brief["as_of"], brief["series"]["date"][0]):
+        assert re.fullmatch(r"\d{4}-\d\d-\d\d", date) and on_page(date) in body, date
     low = page.lower()
     for banned in ("<script", "http://", "https://", " src=", " href=", "@import", "url(",
                    "javascript:", "<link", "<img", "<iframe", "<form", "<!--"):
@@ -529,6 +559,11 @@ def check_page(brief, doc, page):
         origin = "Prices from a file"
     same(header.one("p"), "Desk view %s %s Last %s %s %s %s %s" % (
         view, MID, word, last["t"], unit, MID, origin))
+    # Under that line, in small type and above the tiles: what the desk is and how its only
+    # test ended, in the words of the Markdown report.
+    assert [kid.tag for kid in header.kids] == ["h2", "h1", "p", "small", "div"]
+    same(header.kids[3], said)
+    assert header.kids[3].raw() == said and page.count(said) == 1
     tiles = [
         ("The argument", doc["argument"]["text"], "Bull against Bear"),
         ("The paper desk", doc["desk"]["text"],
@@ -557,8 +592,8 @@ def check_page(brief, doc, page):
     # The chart: its caption, the label at each line's end, the levels and the price axis.
     chart, series = root.one("section", "s4"), brief["series"]
     same(chart.one("small"),
-         "%d daily %ss in %s, %s to %s. 50d and 200d are the 50-day and 200-day averages. "
-         "Dashed lines are the report's levels." % (
+         "%d daily %ss in %s, %s to %s. 50d and 200d: the 50-day and 200-day averages. "
+         "Dashed lines: the report's levels." % (
              len(series["date"]), word, unit, series["date"][0], series["date"][-1]))
     assert series["date"][-1] == brief["as_of"]
     ends = ["%s %s" % (word.capitalize(), last["t"][:13])]
@@ -581,9 +616,28 @@ def check_page(brief, doc, page):
     # A level's label starts where its dashed line starts: a dash before the price would
     # read as a minus sign.
     assert set(node.attrs["x"] for node in chart.find("text", "lt")) <= {"0"}
+    # Each label stands at its own level's line and names that level, from the highest price
+    # down: above the line for the top one, below it for the bottom one, on it otherwise.
+    # No label is moved to keep its distance from another, which put it on a neighbour's line.
+    lines, labels = chart.find("line", "lv"), chart.find("text", "lt")
+    ordered = sorted(doc["levels"], key=lambda lv: -lv["price"])
+    assert len(lines) == len(labels) == len(ordered)
+    for line, label, lv in zip(lines, labels, ordered):
+        assert line.attrs["y1"] == line.attrs["y2"] == label.attrs["y"], lv["label"]
+        assert label.text() == "%s %s %s" % (lv["price_t"][:13], MID, lv["label"][:44])
+    assert [int(label.attrs["dy"]) for label in labels] == level_offsets(len(ordered))
+    heights = [float(line.attrs["y1"].rstrip("%")) for line in lines]
+    assert heights == sorted(heights), "a higher price must be higher on the page"
     steps = [b - a for a, b in zip(ticks, ticks[1:])]
     assert len(ticks) >= 2 and min(steps) > 0 and max(steps) - min(steps) < 1e-6 * max(steps)
     assert ticks[0] <= min(plotted) and max(plotted) <= ticks[-1]
+    # Round steps and no more of them than the prices need: the step is the smallest of 1,
+    # 2, 2.5 and 5 times a power of ten that crosses what is drawn in five steps or fewer.
+    family = sorted(m * 10.0 ** k for k in range(-12, 13) for m in (1, 2, 2.5, 5))
+    size = max(plotted) - min(plotted)
+    if size > 0:
+        step = min(x for x in family if size / x <= 5)
+        assert abs(steps[0] / step - 1) < 1e-6, (steps[0], step)
 
     # The meters: each fact on its real scale, with the words for the number as it is
     # shown. Then the returns, named in days as the report names them.
@@ -632,6 +686,8 @@ def check_page(brief, doc, page):
 
     # The levels: the table, and the ladder with the last price on it.
     card = root.one("section", "cv")
+    assert [cell.text() for cell in card.one("table").kids[0].kids] == [
+        "Level", "Price", "To reach it"]
     rows = card.one("table").kids[1:]
     assert len(rows) == len(doc["levels"])
     for row, lv in zip(rows, doc["levels"]):
@@ -775,37 +831,97 @@ def source_answers(bundle):
     # The source's clock is the HTTP Date header of the chart answer.
     headers = {"content-type": "application/json", "date": http_date(bundle["fetched_at"])}
     answers = [(200, headers, json.dumps(doc).encode("ascii")) for doc in (chart, search, series)]
-    if bundle["errors"].get("statements") == "HTTP 404":
-        answers[2] = (404, headers, b"")
+    # A follow-up request that failed. The bundle keeps the status of a refusal and nothing
+    # else; its other label is for an answer that was not the data.
+    for at, key in ((1, "news"), (2, "statements")):
+        label = bundle["errors"].get(key) or ""
+        if label.startswith("HTTP "):
+            answers[at] = (int(label[5:]), headers, b"")
+        elif label:
+            assert label == "unexpected answer", label
+            answers[at] = (200, headers, b"<html>not the data</html>")
     return answers
 
 
-def download(folder, bundle):
-    """Step 1 of the skill without a network: get_data.py from ``folder`` runs as shipped,
-    except that its one HTTP function answers from ``bundle``. Returns the DATA line."""
+def data_line(bundle):
+    """The line get_data.py prints for a bundle: a request that failed is named as failed,
+    which is not the same as data the source does not have."""
+    errors = bundle["errors"]
+    return "DATA ok %s bars=%d headlines=%s statements=%s" % (
+        bundle["symbol"], len(bundle["chart"]["timestamp"]),
+        "failed" if errors["news"] else len(bundle["news"]),
+        "failed" if errors["statements"] else
+        "ok" if any(bundle["statements"].values()) else "absent")
+
+
+class Pauses:
+    """Stands in for the time module inside get_data.py: a pause is written down, not waited."""
+
+    def __init__(self):
+        self.seconds = []
+
+    def sleep(self, seconds):
+        self.seconds.append(seconds)
+
+
+class Fetched:
+    """One run of get_data.py: exit code, the two streams, the addresses asked, the pauses."""
+
+    def __init__(self, rc, out, err, asked, pauses):
+        self.rc, self.out, self.err, self.asked, self.pauses = rc, out, err, asked, pauses
+
+
+def run_get_data(folder, symbol, answers):
+    """Step 1 of the skill without a network and without waiting: get_data.py from ``folder``
+    runs as shipped, except that its one HTTP function answers from ``answers`` and its clock
+    is a stand-in. ``answers`` holds the source's answer to the chart, the search and the
+    statements request, in that order; a list in place of one answer is the answers to that
+    request one after another."""
     script = load(folder / "get_data.py", "get_data_in_" + hashlib.sha256(
         str(folder).encode("utf-8")).hexdigest()[:8])
-    chart, search, series = source_answers(bundle)
-    asked = []
+    answers = [list(a) if isinstance(a, list) else a for a in answers]
+    asked, pauses = [], Pauses()
 
     def http_get(url):
         asked.append(url)
         assert url.startswith(HOST + "/"), url
-        if "/v8/finance/chart/" in url:
-            return chart
-        return search if "/v1/finance/search" in url else series
+        at = 0 if "/v8/finance/chart/" in url else 1 if "/v1/finance/search" in url else 2
+        return answers[at].pop(0) if isinstance(answers[at], list) else answers[at]
 
-    script.http_get = http_get
-    out, keep = io.StringIO(), sys.stdout
-    sys.stdout = out
+    script.http_get, script.time = http_get, pauses
+    out, err, keep = io.StringIO(), io.StringIO(), (sys.stdout, sys.stderr)
+    sys.stdout, sys.stderr = out, err
     try:
-        code = script.main([bundle["symbol"], str(folder / "bundle.json")])
+        code = script.main([symbol, str(folder / "bundle.json")])
     finally:
-        sys.stdout = keep
-    assert code == 0 and len(asked) == 3, (code, asked)
+        sys.stdout, sys.stderr = keep
+    return Fetched(code, out.getvalue(), err.getvalue(), asked, pauses.seconds)
+
+
+def statements_asked(bundle):
+    """Whether get_data.py sends its third request for this bundle's instrument. Only a
+    company has statements: the request goes out when the chart calls the instrument a share
+    or names no type, and for a fund, an index or a coin it is not sent."""
+    return bundle["chart"]["meta"].get("instrumentType") in (None, "EQUITY")
+
+
+def download(folder, bundle):
+    """Step 1 for a bundle the source would give: every request answered at once, or a
+    follow-up request refused as the bundle's errors block says. Returns the DATA line."""
+    answers = source_answers(bundle)
+    done = run_get_data(folder, bundle["symbol"], answers)
+    sent = answers if statements_asked(bundle) else answers[:2]
+    # A rate limit (429) is waited out once, for 7 seconds, and asked once more; any other
+    # answer is final.
+    limited = [status for status, _, _ in sent].count(429)
+    assert (done.rc, done.err) == (0, "") and len(done.asked) == len(sent) + limited, (
+        done.rc, done.err, done.asked)
+    assert any("/timeseries/" in url for url in done.asked) == statements_asked(bundle)
+    assert done.pauses == [7] * limited, done.pauses
     # The bundle on disk is the source's answer and nothing else.
     assert json.loads(read(folder / "bundle.json")) == bundle
-    return out.getvalue().strip()
+    assert done.out == data_line(bundle) + "\n", done.out
+    return done.out.strip()
 
 
 def desk_run(folder, bundle, draft, attempt=1, fetch=False):
@@ -816,9 +932,7 @@ def desk_run(folder, bundle, draft, attempt=1, fetch=False):
     written to the file directly, as when the user supplies the data.
     """
     if fetch:
-        line = download(folder, bundle)
-        assert line.startswith("DATA ok %s bars=%d " % (
-            bundle["symbol"], len(bundle["chart"]["timestamp"]))), line
+        download(folder, bundle)
     else:
         (folder / "bundle.json").write_bytes(json.dumps(bundle).encode("ascii") + b"\n")
     (folder / "draft.txt").write_bytes(draft.encode("ascii"))
@@ -889,7 +1003,9 @@ def check_report(folder, made, shown, drawn, attempt=1):
     # The page: drawn from the brief and the resolved report, and nothing else.
     assert drawn.lines == ["PAGE ok %s %s bytes=%d" % (
         brief["symbol"], rid, len((folder / "report.html").read_bytes()))]
-    check_page(brief, doc, page)
+    # The sentence under the report's first line is read from the report as render.py wrote
+    # it, and the page's header must carry that very sentence.
+    check_page(brief, doc, page, said=report.split("\n\n")[2])
     return brief, report, doc
 
 
@@ -927,6 +1043,16 @@ def test_preflight_passes_on_the_copied_scripts():
         done = run(folder / "brief.py", "--preflight", folder)
         assert done.rc == 0 and done.err == "", done.err
         assert done.lines == [preflight_line(NAMES)]
+        # The folder written with a separator at its end is the same folder.
+        done = run(folder / "brief.py", "--preflight", str(folder) + "/")
+        assert (done.rc, done.err, done.lines) == (0, "", [preflight_line(NAMES)])
+        if "\\" not in str(folder):
+            # Where a backslash is a character of a name and not a separator, a folder whose
+            # name ends in one is checked under the name as written. The preflight used to
+            # strip it and then looked into another folder.
+            odd = copy_scripts(Path(tmp) / "desk\\")
+            done = run(odd / "brief.py", "--preflight", odd)
+            assert (done.rc, done.err, done.lines) == (0, "", [preflight_line(NAMES)])
 
 
 def test_the_preflight_checks_the_optional_scripts_only_when_they_are_there():
@@ -1118,6 +1244,240 @@ def test_a_data_problem_is_one_stop_line_and_no_brief():
         assert not (folder / "unused.json").exists()
 
 
+# The statement facts in the order brief.py names them when none of them could be given.
+STATEMENT_FACTS = ("pe_trailing, pe_forward, peg, mcap, rev_ttm, ni_ttm, margin_ttm, rev_q, "
+                   "rev_q_yoy, ni_q, ni_q_yoy, debt, equity, debt_equity")
+LIMITED = (429, {"content-type": "text/html"}, b"Too Many Requests\r\n")
+E_BUSY = ("STOP E_BUSY the data source is limiting requests from this network right now; this "
+          "is not a problem with the ticker, and a new run in a few minutes may work (HTTP 429)")
+E_REFUSED = ("STOP E_REFUSED the data source refused this network; this is not a problem with "
+             "the ticker and waiting rarely helps (HTTP %d)")
+E_NOT_FOUND_DOT = ("STOP E_NOT_FOUND the data source has no data for this symbol; check the "
+                   "spelling; a US share class is written with a hyphen there, not a dot (BRK-B, "
+                   "not BRK.B); for another exchange, check the letters after the dot (HTTP 404)")
+
+
+def test_a_rate_limit_is_waited_out_once_and_then_named_for_what_it_is():
+    bundle = make_bundle()
+    chart, search, series = source_answers(bundle)
+    with tempfile.TemporaryDirectory(prefix="desk ") as tmp:
+        folder = copy_scripts(Path(tmp) / "desk run")
+        # Limited once on each of the three requests and answered on the new attempt: the
+        # data is whole, and the only trace is the three pauses of 7 seconds.
+        done = run_get_data(folder, "TEST", ([LIMITED, chart], [LIMITED, search],
+                                             [LIMITED, series]))
+        assert (done.rc, done.err) == (0, ""), done.err
+        assert done.out == "DATA ok TEST bars=260 headlines=2 statements=ok\n"
+        assert done.pauses == [7, 7, 7] and len(done.asked) == 6
+        assert done.asked[0::2] == done.asked[1::2] and len(set(done.asked)) == 3
+        assert json.loads(read(folder / "bundle.json")) == bundle
+        # The pause is the same seven seconds whatever the refusal says: a Retry-After
+        # header is not read. That is a decision, held here as it is.
+        for wait in ("1", "120", "Wed, 11 Nov 2026 04:10:00 GMT"):
+            hinted = (429, {"content-type": "text/html", "Retry-After": wait}, b"")
+            done = run_get_data(folder, "TEST", ([hinted, chart], search, series))
+            assert (done.rc, done.err, done.pauses) == (0, "", [7]), (wait, done.err)
+            assert len(done.asked) == 4
+
+        # The chart request limited again on the new attempt: one stop line that says so, with
+        # the status, after one pause. The file was opened before the first request, so no
+        # bundle of an earlier run is left for the next step to read.
+        done = run_get_data(folder, "TEST", ([LIMITED, LIMITED], search, series))
+        assert (done.rc, done.out, done.err) == (2, "", E_BUSY + "\n")
+        assert done.pauses == [7] and len(done.asked) == 2
+        assert read(folder / "bundle.json") == ""
+        made = run(folder / "brief.py", folder / "bundle.json", folder / "brief.json")
+        assert made.rc == 2 and made.out == "" and len(made.err_lines) == 1, made.err
+        assert made.err_lines[0].startswith("STOP E_INPUT ")
+        assert not (folder / "brief.json").exists()
+
+        # A refusal is not a rate limit: it is final at once, and the line says which it was.
+        for status in (401, 403, 999):
+            done = run_get_data(folder, "TEST", ((status, {}, b""), search, series))
+            assert (done.rc, done.out, done.err) == (2, "", E_REFUSED % status + "\n")
+            assert done.pauses == [] and len(done.asked) == 1
+        # So is a symbol the source does not know, and an error of the source's own.
+        for status, start in ((404, "STOP E_NOT_FOUND "), (503, "STOP E_SERVER ")):
+            done = run_get_data(folder, "TEST", ((status, {}, b""), search, series))
+            assert done.rc == 2 and done.err.startswith(start), done.err
+            assert done.err.endswith(" (HTTP %d)\n" % status), done.err
+            assert done.pauses == [] and len(done.asked) == 1
+        # A symbol with a dot that the source does not know: the hint covers both things the
+        # dot can stand for, and the status comes last.
+        done = run_get_data(folder, "brk.b", ((404, {}, b""), search, series))
+        assert (done.rc, done.out, done.err) == (2, "", E_NOT_FOUND_DOT + "\n")
+        assert len(done.asked) == 1 and "/v8/finance/chart/BRK.B?" in done.asked[0]
+        # A symbol with no letter or digit in it is refused before any request.
+        done = run_get_data(folder, ".-.", (chart, search, series))
+        assert done.rc == 2 and done.err.startswith("STOP E_SYMBOL "), done.err
+        assert done.asked == [] and "HTTP" not in done.err
+
+
+def test_a_request_that_failed_is_said_as_that_from_the_data_line_to_the_page():
+    """The bars came and the two follow-up requests were still limited on the new attempt.
+    The fact sheet has prices only, as when the source has no such data, but the DATA line
+    and the two notes say that the requests failed."""
+    limited = make_bundle()
+    limited["news"], limited["statements"] = [], dict((k, []) for k in limited["statements"])
+    limited["errors"] = {"news": "HTTP 429", "statements": "HTTP 429"}
+    absent = json.loads(json.dumps(limited))
+    absent["errors"] = {"news": None, "statements": None}
+    draft = make_draft(headline=False)
+    with tempfile.TemporaryDirectory(prefix="desk ") as tmp:
+        seen = {}
+        for name, bundle in (("limited", limited), ("absent", absent)):
+            folder = copy_scripts(Path(tmp) / name)
+            seen[name] = download(folder, bundle)
+            brief, report, doc = check_report(folder, *desk_run(folder, bundle, draft))
+            notes = [note["text"] for note in brief["notes"]]
+            seen[name] = (seen[name], notes)
+            # The flags are the same in both runs; the notes travel to the report and the page.
+            assert brief["flags"] == ["statements_absent", "no_headlines"]
+            assert all(md(text) in data_notes(report) for text in notes)
+            assert "Data flags: statements absent, no headlines." in data_notes(report)
+            page = read(folder / "report.html")
+            assert all(on_page(text) in page for text in notes)
+            ok = run(folder / "render.py", "--verify", folder / "brief.json", folder / "report.md")
+            assert (ok.rc, ok.lines) == (0, ["VERIFY ok"])
+        assert seen["limited"] == (
+            "DATA ok TEST bars=260 headlines=failed statements=failed",
+            ["The statement request failed, so these facts are absent: %s." % STATEMENT_FACTS,
+             "The headline request failed."])
+        assert seen["absent"] == (
+            "DATA ok TEST bars=260 headlines=0 statements=absent",
+            ["The source gave no statement figure, so these facts are absent: %s."
+             % STATEMENT_FACTS, "No headlines came with this data."])
+        # Both runs read the same prices: what differs is only what is said about the rest.
+        same = [(Path(tmp) / name / "brief.json").read_bytes() for name in ("limited", "absent")]
+        assert json.loads(same[0])["facts"] == json.loads(same[1])["facts"]
+
+
+def test_a_fund_an_index_or_a_coin_is_asked_for_no_statement_figures():
+    """Only a company has statements. When the chart names another type, get_data.py sends
+    two requests and not three, and the DATA line and the notes say that the source has no
+    statement figure: no request failed. A share, and an instrument whose type the chart
+    does not name, are asked as before."""
+    share = make_bundle()
+    assert any(share["statements"].values())
+    empty = dict((key, []) for key in share["statements"])
+    with tempfile.TemporaryDirectory(prefix="desk ") as tmp:
+        for n, kind in enumerate(("ETF", "MUTUALFUND", "INDEX", "CRYPTOCURRENCY", "FUTURE",
+                                  "EQUITY", None)):
+            asked = kind in ("EQUITY", None)
+            bundle = make_bundle()
+            if kind is None:
+                del bundle["chart"]["meta"]["instrumentType"]
+            else:
+                bundle["chart"]["meta"]["instrumentType"] = kind
+            # The stand-in would answer a third request with the share's figures, so what
+            # the saved bundle holds shows whether that request was sent.
+            chart, search, series = source_answers(bundle)
+            assert b"trailingPeRatio" in series[2] and b"reportedValue" in series[2]
+            folder = copy_scripts(Path(tmp) / ("type %d" % n))
+            done = run_get_data(folder, "TEST", (chart, search, series))
+            assert (done.rc, done.err, done.pauses) == (0, "", []), (kind, done.err)
+            assert len(done.asked) == (3 if asked else 2), (kind, done.asked)
+            assert "/v8/finance/chart/TEST?" in done.asked[0]
+            assert "/v1/finance/search?q=TEST&" in done.asked[1]
+            assert any("/timeseries/" in url for url in done.asked) == asked, kind
+            assert done.out == "DATA ok TEST bars=260 headlines=2 statements=%s\n" % (
+                "ok" if asked else "absent"), (kind, done.out)
+            saved = json.loads(read(folder / "bundle.json"))
+            assert saved == (bundle if asked else dict(bundle, statements=empty)), kind
+            assert saved["errors"] == {"news": None, "statements": None}
+            # A source that limits the statement route is neither waited for nor named as
+            # failed when the route is not asked.
+            done = run_get_data(folder, "TEST", (chart, search, [LIMITED, LIMITED]))
+            assert (done.rc, done.err) == (0, ""), (kind, done.err)
+            assert (done.pauses, len(done.asked)) == (([7], 4) if asked else ([], 2)), kind
+            assert done.out == "DATA ok TEST bars=260 headlines=2 statements=%s\n" % (
+                "failed" if asked else "absent"), (kind, done.out)
+            (folder / "bundle.json").write_bytes(json.dumps(saved).encode("ascii") + b"\n")
+
+            if kind in ("ETF", "MUTUALFUND", "INDEX"):
+                # The same through the brief, the report and the page: the flag, the note
+                # for data the source does not have, and no statement card.
+                assert download(folder, saved) == (
+                    "DATA ok TEST bars=260 headlines=2 statements=absent")
+                brief, report, doc = check_report(folder, *desk_run(folder, saved, make_draft()))
+                assert (brief["type"], brief["flags"]) == (kind, ["statements_absent"])
+                note = ("The source gave no statement figure, so these facts are absent: %s."
+                        % STATEMENT_FACTS)
+                assert [x["text"] for x in brief["notes"]] == [note]
+                assert md(note) in data_notes(report) and "failed" not in report
+                page = Tree(read(folder / "report.html")).root
+                assert page.find("section", "fd") == [] and len(page.find("section", "hd")) == 1
+                assert [item.text() for item in page.one("aside").find("li")] == [note]
+
+
+def price_file(bundle):
+    """The bundle's rows as a price file from the user: the header line, then a line a day."""
+    ch = bundle["chart"]
+    lines = ["date,open,high,low,close,volume"]
+    for i, stamp in enumerate(ch["timestamp"]):
+        day = iso((stamp + ch["meta"]["gmtoffset"]) // DAY)
+        lines.append(",".join([day] + [repr(ch[key][i]) for key in COLS]))
+    return "\n".join(lines) + "\n"
+
+
+def test_a_price_file_gives_the_same_price_facts_and_says_what_it_cannot_know():
+    bundle = make_bundle()
+    want = expected_texts(bundle)
+    draft = make_draft(headline=False)
+    with tempfile.TemporaryDirectory(prefix="desk ") as tmp:
+        online = copy_scripts(Path(tmp) / "download")
+        downloaded, _, _ = check_report(
+            online, *desk_run(online, bundle, make_draft(), fetch=True))
+        # A host with no network has no get_data.py in the folder.
+        folder = copy_scripts(Path(tmp) / "price file", names=("brief.py", "render.py", "page.py"))
+        (folder / "prices.csv").write_bytes(price_file(bundle).encode("ascii"))
+        (folder / "draft.txt").write_bytes(draft.encode("ascii"))
+        made = run(folder / "brief.py", folder / "prices.csv", folder / "brief.json",
+                   "--symbol", "TEST", "--currency", "USD")
+        shown = run(folder / "render.py", folder / "brief.json", folder / "draft.txt",
+                    folder / "report.md", folder / "report.json")
+        drawn = run(folder / "page.py", folder / "brief.json", folder / "report.json",
+                    folder / "report.html")
+        brief, report, doc = check_report(folder, made, shown, drawn)
+        assert (brief["source"], brief["session"]) == ("price-file", "unknown")
+        assert brief["data_id"] == downloaded["data_id"]
+        for name, text in want.items():
+            assert brief["facts"][name]["t"] == text, name
+        # The sheet has prices only, and the notes say what a file cannot tell.
+        assert brief["flags"] == ["statements_absent", "no_headlines"]
+        assert [note["text"] for note in brief["notes"]] == [
+            "The source gave no session times, so the newest row may not be final.",
+            "These prices came from a file; when they were downloaded is not known.",
+            "The source gave no statement figure, so these facts are absent: %s."
+            % STATEMENT_FACTS,
+            "No headlines came with this data."]
+        assert report.split("\n\n")[1] == (
+            "Desk view at the 2026-11-10 last price%s**%s USD**%sprices from a file" % (
+                DOT, want["last"], DOT))
+        assert "fetched" not in report.split("**Data notes**")[0]
+        # The symbol is the user's word here. Dots and hyphens alone name nothing.
+        odd = run(folder / "brief.py", folder / "prices.csv", folder / "odd.json",
+                  "--symbol", ".-.", "--currency", "USD")
+        assert (odd.rc, odd.out) == (2, "") and not (folder / "odd.json").exists()
+        assert odd.err_lines == ["STOP E_SYMBOL the symbol is not a plain ticker"]
+        # The session is not known to be over, so the newest price may not be called a close:
+        # the line names the words to use, and the draft that uses them is the one above.
+        closed = draft.replace("The price stood at {{last}}", "The stock closed at {{last}}")
+        assert closed != draft
+        (folder / "closed.txt").write_bytes(closed.encode("ascii"))
+        refused = run(folder / "render.py", folder / "brief.json", folder / "closed.txt",
+                      folder / "closed.md", folder / "closed.json")
+        assert (refused.rc, refused.err) == (1, "")
+        assert refused.lines == ['FIX why: D_NOTE the session may be unfinished: say "the '
+                                 'price", not "close" | try: the price']
+        assert not (folder / "closed.md").exists() and not (folder / "closed.json").exists()
+        # The same sentence is fine on the download, whose session is known to be over.
+        (online / "closed.txt").write_bytes(closed.encode("ascii"))
+        fine = run(online / "render.py", online / "brief.json", online / "closed.txt",
+                   online / "closed.md", online / "closed.json")
+        assert (fine.rc, fine.err) == (0, ""), fine.out
+
+
 def test_the_row_shapes_seen_live_reach_the_report_and_the_page():
     with tempfile.TemporaryDirectory(prefix="desk ") as tmp:
         plain = copy_scripts(Path(tmp) / "plain")
@@ -1155,8 +1515,10 @@ def test_the_row_shapes_seen_live_reach_the_report_and_the_page():
         assert header.endswith(DOT + "the source is behind, see Data notes")
         assert note in data_notes(report)
         page = read(folder / "report.html")
-        assert "Desk view at the 2026-11-06 close (the data source is behind)" in page
-        assert "<aside><b>Data notes</b><ul class=list><li>" + html.escape(note) in page
+        assert on_page("Desk view at the 2026-11-06 close (the data source is behind)") in page
+        assert "<aside><b>Data notes</b><ul class=list><li>" + on_page(note) in page
+        # Each date in that note is written with the hyphen that does not break.
+        assert "2026&#8209;11&#8209;09 yet" in page and "2026-11-0" not in page
 
         # Two rows for the newest date: one is kept and nothing is said, so every file is
         # the one the plain bundle gives.
@@ -1190,8 +1552,9 @@ def mutations(text, count, seed):
     """``count`` single-character edits of ``text``: a replacement, a deletion or an insertion
     at a random non-blank character. Returns (description, new text) pairs.
 
-    The value after ``SELF = `` is left alone. The contract takes the SELF line out of the
-    hash, so an edit there is seen by the script's own run, not by a sibling's check.
+    The value after ``SELF = `` is left alone. The contract's hash reads the stamp line as
+    the one word SELF whatever its value, so an edit there is seen by the script's own run,
+    not by a sibling's check.
     """
     stamp = re.search(r'(?m)^SELF = ("[0-9a-f]{12}")$', text)
     spots = [i for i, ch in enumerate(text)
@@ -1267,10 +1630,17 @@ def test_scripts_written_out_by_a_tool_that_decodes_escapes_are_still_accepted()
         assert done.lines == [preflight_line(NAMES)]
 
 
+STAMP = re.compile(rb'(?m)^SELF = "[0-9a-f]{12}"\n')
+VERSION_AND_STAMP = re.compile(rb'(?m)^(VERSION = "2\.0\.0"\n)(SELF = "[0-9a-f]{12}"\n)')
+
+
 def test_a_copy_with_a_mark_in_front_or_an_extra_stamp_line_is_refused():
-    # One rule for all four scripts: the hash is over the bytes, and only the stamp line
-    # itself is left out. A byte-order mark used to pass in one script and fail in two, and
-    # code on a second line that began like the stamp passed the preflight in all four.
+    # One rule for all four scripts: the hash is over the bytes, with the stamp line itself
+    # read as the one word SELF. A byte-order mark used to pass in one script and fail in
+    # two, and code on a second line that began like the stamp passed the preflight in all
+    # four. The stamp line used to be left out of the hash altogether, so the preflight
+    # passed a script with a second stamp line or with its stamp line in another place, and
+    # any of the other three scripts with no stamp line at all.
     changes = (
         ("a byte-order mark", lambda data: b"\xef\xbb\xbf" + data),
         ("code on a line that starts like the stamp", lambda data: data.replace(
@@ -1280,6 +1650,11 @@ def test_a_copy_with_a_mark_in_front_or_an_extra_stamp_line_is_refused():
         ("a no-break space for a space", lambda data: data.replace(
             b"Trading Agents Desk", b"Trading\xc2\xa0Agents Desk", 1) if b"Trading Agents Desk"
             in data else data.replace(b"one host", b"one\xc2\xa0host", 1)),
+        ("a second stamp line above the stamp", lambda data: STAMP.sub(
+            lambda m: b'SELF = "0123456789ab"\n' + m.group(), data)),
+        ("the stamp line twice", lambda data: STAMP.sub(lambda m: m.group() * 2, data)),
+        ("the stamp line one line up", lambda data: VERSION_AND_STAMP.sub(rb"\2\1", data)),
+        ("no stamp line", lambda data: STAMP.sub(b"", data)),
     )
     with tempfile.TemporaryDirectory(prefix="desk ") as tmp:
         folder = copy_scripts(Path(tmp) / "desk run")
@@ -1295,11 +1670,82 @@ def test_a_copy_with_a_mark_in_front_or_an_extra_stamp_line_is_refused():
                 code = "E_SELF" if name == "brief.py" else "E_SIBLING " + name
                 assert done.err_lines[-1].startswith("ERROR " + code), (where, done.err)
                 if name in ("render.py", "page.py"):
-                    # The changed script refuses its own run in the same way.
+                    # The changed script refuses its own run in the same way. A copy with no
+                    # stamp line has nothing to compare its hash with: it does not run, and
+                    # which line it ends with is not held here.
                     own = run(folder / name, "--version")
-                    assert own.rc == 3 and own.err_lines[-1].startswith("ERROR E_SELF "), where
+                    assert own.rc != 0 and own.out == "" and len(own.err_lines) == 1, where
+                    if what != "no stamp line":
+                        assert own.rc == 3 and own.err_lines[0].startswith("ERROR E_SELF "), where
             (folder / name).write_bytes(good)
         assert run(folder / "brief.py", "--preflight", folder).rc == 0
+
+
+WARN = "WARN unstamped development copy"
+ALTERED = "ERROR E_SIBLING %s is missing or was altered; load the skill files again"
+
+
+def test_a_copy_whose_stamp_line_is_the_bare_word_passes_the_preflight_and_cannot_run():
+    # A known limit of the hash rule, held here as it is. The hash reads the stamp line as
+    # the one word SELF, so a copy that holds that word in place of its stamp line hashes as
+    # the stamped copy, and the preflight passes it. Such a copy cannot do its job: Python
+    # stops at that line with a NameError before the script writes anything. In brief.py the
+    # line stops the preflight itself.
+    with tempfile.TemporaryDirectory(prefix="desk ") as tmp:
+        for name in NAMES:
+            folder = copy_scripts(Path(tmp) / name[:-3])
+            bare, count = STAMP.subn(b"SELF\n", (folder / name).read_bytes())
+            assert count == 1
+            (folder / name).write_bytes(bare)
+            pre = run(folder / "brief.py", "--preflight", folder)
+            if name == "brief.py":
+                assert pre.rc == 1 and pre.out == "", (pre.rc, pre.out)
+                assert pre.err_lines[-1].startswith("NameError: name 'SELF' is not defined")
+            else:
+                assert (pre.rc, pre.err, pre.lines) == (0, "", [preflight_line(NAMES)]), name
+            own = run(folder / name, "--version")
+            assert own.rc == 1 and own.out == "", (name, own.rc, own.out)
+            assert own.err_lines[-1].startswith("NameError: name 'SELF' is not defined"), name
+            if name == "get_data.py":
+                # Its real job is a download, which is not run from here.
+                continue
+            # The same on its real job: nothing is printed and no file is written.
+            made, shown, drawn = desk_run(folder, make_bundle(), make_draft())
+            failed = {"brief.py": made, "render.py": shown, "page.py": drawn}[name]
+            assert failed.rc == 1 and failed.out == "" and "NameError" in failed.err, name
+            written = {"brief.py": "brief.json", "render.py": "report.md",
+                       "page.py": "report.html"}[name]
+            assert not (folder / written).exists(), name
+
+
+def test_a_stamp_of_zeros_under_the_stamp_line_makes_a_development_copy():
+    # By design, held here as it is. A line SELF = "000000000000" under the real stamp line
+    # is the last word on the name SELF, so the copy takes itself for a development copy: it
+    # does not compare its hash, warns on stderr and runs. (get_data.py checks nothing
+    # itself, so it does not warn.) The preflight is not taken in: the added line changes
+    # the hash of the file. Added to brief.py, it makes the preflight a development copy
+    # too: it warns, checks the other three and passes.
+    with tempfile.TemporaryDirectory(prefix="desk ") as tmp:
+        for name in NAMES:
+            folder = copy_scripts(Path(tmp) / name[:-3])
+            good = (folder / name).read_bytes()
+            changed = STAMP.sub(lambda m: m.group() + b'SELF = "000000000000"\n', good)
+            assert len(changed) == len(good) + 22
+            (folder / name).write_bytes(changed)
+            own = run(folder / name, "--version")
+            assert (own.rc, own.lines) == (0, ["trading-agents-desk %s 2.0.0" % name]), name
+            assert own.err_lines == ([] if name == "get_data.py" else [WARN]), (name, own.err)
+            pre = run(folder / "brief.py", "--preflight", folder)
+            if name == "brief.py":
+                assert (pre.rc, pre.err_lines, pre.lines) == (0, [WARN], [preflight_line(NAMES)])
+            else:
+                assert (pre.rc, pre.out, pre.err_lines) == (3, "", [ALTERED % name]), name
+        # Such a copy of page.py draws the page of the stamped one, with the warning.
+        made, shown, drawn = desk_run(folder, make_bundle(), make_draft())
+        assert (drawn.rc, drawn.err_lines) == (0, [WARN]) and drawn.lines[0].startswith("PAGE ok ")
+        plain = copy_scripts(Path(tmp) / "plain")
+        check_report(plain, *desk_run(plain, make_bundle(), make_draft()))
+        assert (folder / "report.html").read_bytes() == (plain / "report.html").read_bytes()
 
 
 def main():

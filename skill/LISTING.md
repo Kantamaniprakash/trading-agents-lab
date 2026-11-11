@@ -25,10 +25,12 @@ holds the instructions and four Python scripts, and that is all a buyer's agent 
    python skill/build_skill.py
    ```
 
-3. Run the skill from the ZIP once on every host you want to mark "tested" in the table under
-   "What it needs", and change the table to what you saw. Leave every other row at "not
-   tested yet".
-4. Upload the ZIP and paste the fields below. Add screenshots only from real runs.
+3. Run the skill from the ZIP once on every agent host you want to name in the table under
+   "What it needs", and change the table to what you saw. A host nobody has run it on is not
+   named as tested.
+4. Upload the ZIP and paste the fields below. Add screenshots only from real runs. Where the
+   marketplace asks which of its tools the skill may use, name
+   `yahoo-finance:get_historical_data` and no other.
 
 For a later release: change the scripts or the text, run step 2, commit, upload. The marketplace
 reloads the skill for every buyer.
@@ -69,33 +71,36 @@ have been computed from fresh data, remembered from training, lifted from a head
 the wrong way or given the wrong sign. The page looks the same in every case, and you cannot
 tell which figures to trust without redoing the work.
 
-This skill takes the typing away. The agent never writes a market number. It names a fact, and
-a script prints the value from data downloaded for that run.
+This skill takes the typing away. The agent never types a market number in digits. It names a
+fact, and a script prints the value from the data of that run.
 
 ### What happens, in order
 
 1. **A script downloads the data.** Daily prices for the past year with the exchange's session
-   times, recent headlines and a few statement figures, from one host,
-   `query1.finance.yahoo.com`. No key, no account, no cookies.
+   times, recent headlines and, for a company, a few statement figures, from one host,
+   `query1.finance.yahoo.com`. No key, no account, no cookies. When the source answers a
+   request with a rate limit, the script waits seven seconds and sends that request once more.
 2. **A second script checks the data and computes the figures.** It stops with a fixed sentence
    when the data cannot be used: too few rows, a break of more than 12 days in the dates,
-   impossible prices, data more than 12 days old, an instrument type the desk does not cover.
-   It computes every indicator and every other figure the desk may cite, each under a fixed
-   name, and prints them as a fact sheet. Anything unusual about the data becomes a flag and
-   a note: an unfinished trading day, a newest close filled from the exchange's last regular
-   price, rows left out, a shorter break in the dates such as a long holiday, statement
-   figures or headlines missing, a short history. When the source has not yet published a
-   finished session, the view ends at the last complete day, and the first line of the
-   report says that the source is behind.
+   impossible prices, a download more than 12 days old, an instrument type the desk does not
+   cover. It computes every indicator and every other figure the desk may cite, each under a
+   fixed name, and prints them as a fact sheet. Anything unusual about the data becomes a flag
+   and a note: an unfinished trading day, a newest close filled from the exchange's last
+   regular price, rows left out, a shorter break in the dates such as a long holiday,
+   statement figures or headlines missing or their request failed, a short history. When the
+   source has not yet published a finished session, the view ends at the last complete day,
+   and the first line of the report says that the source is behind.
 3. **Your agent runs the desk from that fact sheet.** Twelve roles in a fixed order: four
    analysts, a bull and a bear researcher with a facilitator, a trader, three risk analysts
    and a fund manager who can approve the trade, shrink it or reject it.
 4. **Your agent writes a draft that names facts.** It writes `{{rsi14}}`, not a number. Evidence
    lists are lists of fact names.
 5. **A third script writes the report.** It sends the draft back if it holds a typed digit, an
-   unknown fact name, a figure placed under another indicator's label, or advice wording, and
-   says what to fix. Your agent gets two more attempts. Then the script inserts each figure,
-   applies the desk's decision rules, prints the report and adds the receipt.
+   unknown fact name, a reference that stands straight after another indicator's name (as in
+   "MFI {{rsi14}}"), or advice wording, and says what to fix. A figure that stands further
+   from the wrong name is not caught. Your agent gets two more attempts. Then the script
+   inserts each figure, applies the desk's decision rules, prints the report and adds the
+   receipt.
 6. **A fourth script can draw the report as a page.** Your agent runs it when its host can
    show or save an HTML file, or when you ask for the page. The report in the chat is the
    answer either way.
@@ -122,8 +127,8 @@ For one ticker, in the chat:
 - Why, in up to three sentences.
 - Bull against bear, side by side: core claim, best evidence, one more point, and the weak
   point of each case.
-- One to three price levels that would change the view, each with its distance from the last
-  price.
+- One to three price levels that would change the view, each with the move from the newest
+  price that would reach it.
 - The risk review.
 - Data notes: every flag and note from the data check, which roles were skipped, and how the
   roles were run.
@@ -134,7 +139,9 @@ The same report can be drawn as one HTML page. From top to bottom the page has:
 
 - A dark header band with four tiles: which side won the argument, the paper desk's
   decision, the last price with its one-day change, and how many figures the script
-  inserted.
+  inserted. The line "Research simulation, not advice. This desk design lost to
+  buy-and-hold in its only test." stands at the top of the page, under the first line of
+  the header.
 - The "why" sentences in large type.
 - A notice strip with the data notes, when the data check raised a flag.
 - A price chart of the newest 120 daily prices with the 50-day and 200-day averages, and
@@ -144,7 +151,8 @@ The same report can be drawn as one HTML page. From top to bottom the page has:
   days.
 - The bull case and the bear case as two equal cards: claim, evidence, one more point and
   the weak point.
-- The levels on a price ladder with the last price, and as a table, beside the risk review.
+- The levels on a price ladder with the last price, and as a table that says how far the
+  price is from each, beside the risk review.
 - Statement figures as tiles, each with its own date and, for a money figure, its own
   currency, beside the headlines the desk saw.
 - The receipts: the test record made prominent, the three receipt lines, the data notes and
@@ -158,13 +166,14 @@ external requests. On a narrow screen the cards stack in one column.
 
 - An agent that can run commands and write files.
 - Python 3.9 or newer where those commands run. Nothing is installed: the scripts use the
-  standard library only. Python 3.9 to 3.13 have been run; 3.14 and newer have not.
+  standard library only. The table below says which versions and systems have been run.
 - Either network access from the command tool to `query1.finance.yahoo.com`, or a price file
   you supply (date, open, high, low, close, volume; 60 daily rows or more). With a price file
   there are no headlines and no statement figures, and the report says so.
 - A saved result of the marketplace's price-history tool also works as a price file, except
   for listings in Australia and New Zealand. That result carries no exchange dates, and for
-  an exchange that opens late in the UTC day the script stops instead of guessing them.
+  an exchange that opens late in the UTC day the script stops instead of guessing them. This
+  route was tried once, on 2026-11-11, with a real saved result for one US share.
 - For the page: a host that can show or save an HTML file. Without one you still get the
   whole report in the chat.
 
@@ -172,16 +181,11 @@ What has been tried so far, and what has not:
 
 | What | Status |
 |---|---|
-| The four scripts, automated tests on generated data, Linux, Python 3.9, 3.10, 3.11, 3.12 and 3.13 | tested on 2026-11-11 |
-| The four scripts on Python 3.14 and newer | not tested yet |
-| One run by hand from the built ZIP on Linux: a saved price history in place of the download, a hand-written draft, the report, its check and the page | tested once on 2026-11-11 |
-| A live download from one Linux cloud machine on 2026-11-11 (a US share, a London share, a crypto pair) | tested once, with an earlier build. `get_data.py` had review changes afterwards and was then run on recorded answers only. Not repeated with this build |
-| The four scripts on macOS and on Windows | not tested yet |
-| Claude Code, run by the agent from the installed skill | not tested yet |
-| Claude desktop app or claude.ai with a code tool | not tested yet |
-| Codex CLI | not tested yet |
-| Cursor | not tested yet |
-| A host whose command tool has no internet (price-file route), run by an agent | not tested yet |
+| The four scripts: automated tests on generated data, the full suite, on Linux with Python 3.10, 3.11, 3.12 and 3.13, for the build before the last round of fixes | tested on 2026-11-11. The suite is run again on the final build |
+| The four scripts in CI on GitHub, for the pull request's commit before the two rounds of fixes: the preflight and the standard-library flow on Linux, macOS and Windows with Python 3.9, 3.13, 3.14 and 3.15 (12 legs; the Linux 3.9 leg runs on Ubuntu 24.04) | tested: all 12 legs passed. It is run again on the final commit |
+| Live downloads from one Linux cloud machine on 2026-11-11, 18 symbols, with the build before the two rounds of fixes | tested once: 12 of the 18 were answered (11 with data, 1 with "no data for this symbol"). The source's rate limit turned the other 6 away within 20 minutes. That is why version 2 now waits once, asks once more and names the limit plainly |
+| The marketplace's price-history tool: a real saved result for one US share, read by `brief.py` | tested once on 2026-11-11 |
+| An agent following the skill from start to finish | see the release notes |
 | The page as a buyer's host shows it | not tested yet. It was looked at in one headless browser only |
 
 Rows change to "tested" only after a real run on that host.
@@ -191,17 +195,53 @@ Rows change to "tested" only after a real run on that host.
 - Research simulation. Not investment advice, not a signal service. It never trades and tells
   your agent not to call brokerage tools.
 - It takes no personal inputs: not your holdings, account size, goals or risk tolerance.
-- One ticker per run, on current data only. It does not run on past dates.
+- One ticker per run, meant for current data. A download whose newest price is more than 12
+  days old stops. A price file is taken as it is: the script cannot know how old a file is.
+  The header then says "prices from a file", and the agent is told to say so above the report
+  when the newest date is more than a few days old. The agent is also told never to run the
+  desk on a past date to see how it would have done. No script can hold it to that.
 - Daily prices for one year. Shares, funds, indexes and crypto pairs. No options, futures,
   currency pairs or intraday data.
 - The data source is unofficial and can refuse a network or change its answers. Then the run
   stops with a sentence that says so. It does not switch to another source by itself.
+- The data source limits requests from shared cloud networks. The script waits once and asks
+  once more. If the limit on the price request still holds, the run stops with a sentence
+  that says so, and a price file or a later run are the ways forward.
+- When only the headline request or the statement request fails, the report says that the
+  request failed, and the desk runs without the roles that need them.
+- On a host that loads the skill through the marketplace, the agent may have to write the
+  four scripts out, about 72 KB of text, before the first command. That costs time and
+  tokens, and a copy with a wrong character is refused by the preflight.
+- An AI host may decline to run the roles for some requests. The skill then tells the agent
+  to say that no report was made.
+- In an unfinished trading day, which for a crypto pair is every current day, the newest row
+  is not final. The script widens that row's range to hold its last price, so a last price
+  above the day's published high does not stop a run. Every average, gap, return and
+  indicator on the sheet includes that row. The report says that the session was unfinished.
+- The source's quotes can be delayed. For half an hour after the closing bell the report
+  says "unfinished" while the source's quote is older than the bell.
+- A thinly traded share can still stop the run. When the source's rows put the open or the
+  close of a finished day outside that day's range, the script stops with a sentence that
+  names the date. There is no report for that ticker from the download, and the agent
+  offers to run on a price file that you supply.
+- A fund, an index or a crypto pair is not asked for statement figures: its report says
+  that they are absent, and the desk runs without the fundamentals analyst.
+- A saved price history can carry a wrong date that the script does not catch: one with a
+  single row stamped late in the UTC day, or with time stamps written as text.
+- One row with a missing value gives one note each, so a history with many such rows gives a
+  long list of notes in the report and on the page.
+- A headline is shown inside double quotes, and a double quote in it is shown as a single
+  one. A headline can still end its own quotation with guillemets or with two apostrophes.
 - The decision is a judgment by a language model. A second run on the same data can give
   another size and, near a neutral verdict, another action.
 - Twelve roles take many model turns, and the token use that goes with them.
 - The report is in English.
 - The page is extra. It is drawn only where the host can show or save a file, and it is not
-  what the receipt covers.
+  what the receipt covers. The page script trusts the fixed texts inside the report file that
+  the report script saved: it does not check that the test record and the disclaimer in that
+  file are unchanged. On the page the 200-day line starts where a year of data allows: for a
+  share that is over the newest 50 or so of the chart's 120 days. And level labels in the
+  chart can overlap when three levels are given and two of them are almost at one price.
 - Not affiliated with or endorsed by Yahoo. Your use of the data is subject to Yahoo's terms.
 
 ### What the receipt guarantees, and what it does not
@@ -231,8 +271,9 @@ What it does not guarantee:
 - That a statement figure is recent. Each one is printed with its date where the script
   prints its label. A figure the agent cites without its label is printed without the date.
 - That the desk chose the facts that matter, or that its view is any good.
-- Quantity words such as "half" and "double", and numbers spelled out as words such as
-  "thirty". They are counted on the receipt and not checked.
+- Quantity words such as "half" and "double", and number words such as "thirty" and
+  "forties". They are counted on the receipt and not checked. "One" and fractions in words
+  ("a fifth") are not counted at all.
 - A currency word or sign the agent writes beside a figure. The header names the unit of the
   prices, such as pence, and a statement money figure carries its own currency code. The
   script does not check a typed "dollars".
@@ -266,8 +307,9 @@ No. Its one test is on this page, and it lost. Read the output as a structured s
 **Does it need an API key or a subscription?**
 
 No. Your agent's own model does the reasoning and your machine downloads the data. If the
-command tool has no internet, one option is the marketplace's own price-history tool, which
-has a small per-use charge that is shown to you for approval first.
+command tool has no internet or the source turns the download away, one option is the
+marketplace's own price-history tool, on a host that saves a tool's result as a file. It has
+a small per-use charge, about $0.07, that the marketplace shows you for approval first.
 
 **What does it put on my machine?**
 
@@ -283,7 +325,10 @@ save an HTML file, or when you ask for it, and tells you where the file is.
 **What if the data source refuses?**
 
 The run stops and shows a fixed sentence that says the fault is at the source and not with the
-ticker. You can then supply a price file, or allow the host for your command tool.
+ticker, and which HTTP status the source gave. After a refusal or a rate limit your choices
+are a price file that you supply, or the marketplace's price-history tool. After a rate limit
+the script has already waited once and asked once more, and a new run a few minutes later may
+work. Allowing the host for your command tool helps only when that tool has no internet at all.
 
 **Does it look at my portfolio or place trades?**
 
@@ -297,8 +342,10 @@ saved report and prints `VERIFY ok` or the differences.
 
 **Is the code available elsewhere?**
 
-Yes. The scripts and the instructions are in the public repository under the MIT licence,
-together with the research lab the desk design comes from. The listing sells the packaging.
+Yes, under the MIT licence. The public repository holds the research lab the desk design
+comes from. Version 2 of the skill, these scripts and instructions, is there on a pull request
+branch until that request is merged, and on the main branch from then on. The listing sells
+the packaging.
 
 **Why twelve roles?**
 
@@ -310,10 +357,11 @@ Fewer roles may come later, decided by experiment.
 
 | Permission | Why |
 |---|---|
-| Terminal | Runs Python: a version check, making one temporary folder, the four scripts, and removing the folder. |
-| Network | One host, `query1.finance.yahoo.com`, from `get_data.py` only. The other three scripts cannot import a network module, and the build checks that. |
+| Terminal | Runs Python: a version check, a one-line command that makes one temporary folder, the four scripts, and a one-line command that removes the folder only if its name starts with `desk-` and it holds `brief.py`. Where the host can, a command also copies the scripts into the folder. |
+| Network | One host, `query1.finance.yahoo.com`, from `get_data.py` only. Its User-Agent string holds the repository's address, which is never contacted. The other three scripts cannot import a network module, and the build checks that. |
 | File write | One new temporary folder per run. Nothing is written to the project folder. |
 | Environment variables | None are read by the scripts. Python's own network library follows the system's proxy settings when `get_data.py` runs. |
+| Marketplace tool | `yahoo-finance:get_historical_data`, the marketplace's price-history tool. Only when the command tool has no internet or the source refuses, and only when the user chooses it. The marketplace shows the price, about $0.07, for approval first. |
 
 The ZIP ships four scripts, written as plain readable Python. The instructions tell the agent
 to copy them unchanged, and a copy that was changed on the way stops with an integrity error.
@@ -334,7 +382,9 @@ edge. Paid skills carry a money-back promise for a skill that does not do what i
 which is one more reason this page promises only what the scripts do. Check the marketplace's
 current creator terms for the revenue split before you set the price.
 
-## Data source note
+## Note for the seller, not listing text: the data provider's terms
+
+This section is for the person who lists the skill. None of it goes on the listing page.
 
 `get_data.py` asks Yahoo Finance's public chart, search and statement endpoints directly, with
 a User-Agent that names this project, no cookies and no login step. These endpoints are

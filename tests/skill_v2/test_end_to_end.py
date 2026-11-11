@@ -145,6 +145,14 @@ def test_a_download_becomes_a_brief_a_report_and_a_page_with_the_right_figures(d
     # The receipt counts exactly the figures the draft asked for.
     assert "- Figures: %d inserted by code from the data." % flow.DRAFT_FIGURES in report
 
+    # A download of one year holds the 200-day average for its newest 61 rows only, so the
+    # page's 200-day line starts half way across the chart. That is how it is meant to be:
+    # nothing is drawn for the rows before.
+    assert [value is None for value in brief["series"]["sma200"]] == [True] * 59 + [False] * 61
+    line = re.search(r'<path class=ln stroke=#1baf7a d="M([^"]*)"',
+                     flow.read(desk / "report.html")).group(1).split("L")
+    assert len(line) == 61 and line[0].startswith("59,") and line[-1].startswith("119,")
+
 
 def test_verify_refuses_a_report_that_was_edited_after_rendering(desk):
     bundle = bundles.bundle()
@@ -185,6 +193,11 @@ def test_the_checks_used_here_refuse_a_report_or_a_page_with_one_changed_figure(
 
     rsi, last, chg = facts["rsi14"]["t"], facts["last"]["t"], facts["chg1"]["t"]
     tick = re.search(r"text-anchor=end>([\d.]+)</text>", page).group(1)
+    # The two level labels in the chart, from the higher price down: (y, dy) of each.
+    (top, above), (bottom, below) = re.findall(r"<text class=lt x=0 y=([\d.]+)% dy=(-?\d+)>", page)
+    assert (above, below) == ("-8", "16") and float(top) < float(bottom)
+    seen = flow.on_page(brief["as_of"])
+    assert seen == "2026&#8209;11&#8209;10" and page.count(seen) >= 4
     pages = {
         "a changed figure in a header tile": (
             "<b>%s</b> on the day" % chg, "<b>+9.99%</b> on the day"),
@@ -202,7 +215,26 @@ def test_the_checks_used_here_refuse_a_report_or_a_page_with_one_changed_figure(
         "a figure in a fixed sentence": ("Dot: the value.", "Dot: the value 42."),
         "a changed test record": ("<b>-0.9%</b>", "<b>+0.9%</b>"),
         "a changed statement date": (
-            "<small>as of %s</small>" % facts["mcap"]["as_of"], "<small>as of 2020-01-01</small>"),
+            "<small>as of %s</small>" % flow.on_page(facts["mcap"]["as_of"]),
+            "<small>as of 2020&#8209;01&#8209;01</small>"),
+        # What this round changed on the page: each of these is the page as it was before.
+        "a date that can break across two lines": (
+            "Desk view at the %s close" % seen, "Desk view at the %s close" % brief["as_of"]),
+        "a statement date that can break": (
+            "<small>as of %s</small>" % flow.on_page(facts["mcap"]["as_of"]),
+            "<small>as of %s</small>" % facts["mcap"]["as_of"]),
+        "a header without the sentence about the test": (
+            "</p><small>%s</small><div class=t>" % flow.LOST, "</p><div class=t>"),
+        "another sentence in the header": ("lost to buy-and-hold", "kept up with buy-and-hold"),
+        "a level label on the other level's line": (
+            "<text class=lt x=0 y=%s%% dy=-8>" % top, "<text class=lt x=0 y=%s%% dy=-8>" % bottom),
+        "a level label pushed down from its line": (
+            "<text class=lt x=0 y=%s%% dy=16>" % bottom,
+            "<text class=lt x=0 y=%.2f%% dy=4>" % (float(bottom) + 6)),
+        "the top level label on its line, not above it": (
+            "<text class=lt x=0 y=%s%% dy=-8>" % top, "<text class=lt x=0 y=%s%% dy=4>" % top),
+        "the levels headed as they were": ("<th>To reach it</th>", "<th>From last</th>"),
+        "the chart caption as it was": ("Dashed lines: the report", "Dashed lines are the report"),
     }
     for what, (old, new) in pages.items():
         changed = page.replace(old, new, 1)
@@ -216,6 +248,9 @@ def test_the_checks_used_here_refuse_a_report_or_a_page_with_one_changed_figure(
             "| **Best evidence** | RSI(14) %s" % rsi, "| **Best evidence** | RSI(14) %s" % last),
         "a changed level distance": (" | Bull, on a close above |", "1 | Bull, on a close above |"),
         "a changed disclaimer": ("not investment advice", "sound investment advice"),
+        "the levels headed as they were": ("| To reach it |", "| From last close |"),
+        "another sentence under the first line": (
+            "\n\n%s\n\n" % flow.LOST, "\n\nResearch simulation, not advice.\n\n"),
     }
     for what, (old, new) in reports.items():
         (desk / "report.md").write_bytes(edit_once(report, old, new).encode("ascii"))
@@ -246,6 +281,12 @@ VARIANTS = {
     "dropped rows": (bundles.null_rows, ["rows_dropped"], "finished"),
     "a week without prices": (lambda: bundles.calendar_gap(7), ["history_gap"], "finished"),
     "no headlines": (lambda: bundles.bundle(seed=26, news=0), ["no_headlines"], "finished"),
+    "both follow-up requests failed": (
+        bundles.rate_limited, ["statements_absent", "no_headlines"], "finished"),
+    "the headline request failed": (
+        lambda: bundles.rate_limited(statements=False), ["no_headlines"], "finished"),
+    "the statement request failed": (
+        lambda: bundles.rate_limited(news=False), ["statements_absent"], "finished"),
     "price below ten": (bundles.low_priced, [], "finished"),
 }
 
@@ -288,6 +329,47 @@ def test_pence_are_named_as_the_unit(desk):
     assert tile.kids[1].text() == brief["facts"]["last"]["t"] + " pence"
 
 
+@pytest.mark.parametrize("kind", ["crypto", "another type", "a price file"])
+def test_a_market_with_a_bar_on_every_day_has_365_bars_in_its_year(tmp_path, kind):
+    """The 52-week high and low reach back 365 bars, and the volatility is annualised over
+    365, when the market has a bar on every calendar day: whatever the bundle calls the
+    instrument, and when a price file calls it nothing. 252 is for a market that is closed
+    at the weekend (the first test of this file)."""
+    bundle = bundles.bundle(seed=73, n=400, every_day=True, gmtoffset=0, news=0,
+                            with_statements=False,
+                            typ="CRYPTOCURRENCY" if kind == "crypto" else "EQUITY")
+    close = bundle["chart"]["close"]
+    high, low = max(close[-365:]), min(close[-365:])
+    # Both lie more than a trading year back, and an older bar is higher than the high.
+    assert high > max(close[-252:]) and low < min(close[-252:]) and high < max(close)
+    folder = flow.copy_scripts(tmp_path / "every day")
+    draft = flow.make_draft(headline=False)
+    if kind == "a price file":
+        (folder / "prices.csv").write_bytes(bundles.csv_text(bundle).encode("ascii"))
+        (folder / "draft.txt").write_bytes(draft.encode("ascii"))
+        made = flow.run(folder / "brief.py", folder / "prices.csv", folder / "brief.json",
+                        "--symbol", "TEST", "--currency", "USD")
+        shown = flow.run(folder / "render.py", folder / "brief.json", folder / "draft.txt",
+                         folder / "report.md", folder / "report.json")
+        drawn = flow.run(folder / "page.py", folder / "brief.json", folder / "report.json",
+                         folder / "report.html")
+        brief, report, _ = flow.check_report(folder, made, shown, drawn)
+    else:
+        brief, report, _, _ = whole_run(folder, bundle, draft)
+    facts = brief["facts"]
+    assert (facts["high52"]["t"], facts["low52"]["t"]) == ("%.2f" % high, "%.2f" % low)
+    moves = [after / before - 1 for before, after in zip(close[-22:], close[-21:])]
+    mean = sum(moves) / 21
+    spread = (sum((x - mean) ** 2 for x in moves) / 20) ** 0.5
+    assert facts["vol21"]["t"] == "%.2f%%" % (100 * spread * 365 ** 0.5)
+    assert facts["vol21"]["t"] != "%.2f%%" % (100 * spread * 252 ** 0.5)
+    # The levels of the report are those of the calendar year.
+    for name, value, words in (("high52", high, "Bull, on a close above"),
+                               ("low52", low, "Bear, on a close below")):
+        assert "| %s | %.2f | %+.1f%% | %s |" % (
+            facts[name]["label"], value, flow.pct(value, close[-1]), words) in report
+
+
 def test_a_fact_the_data_cannot_give_cannot_be_cited(desk):
     """Short history has no 200-day average: the draft cannot name it, so no report."""
     draft = flow.make_draft(levels=TABLE_LEVELS).replace("{{rsi14|label}}", "{{sma200|label}}")
@@ -307,6 +389,149 @@ def test_an_unfinished_session_cannot_be_called_a_close(desk):
     # The same sentence is fine once the session is over.
     made, shown, drawn = flow.desk_run(desk, bundles.bundle(), draft)
     flow.check_report(desk, made, shown, drawn)
+    # "closed down" with the day's own move is the same claim about an unfinished session.
+    clean = flow.make_draft(levels=TABLE_LEVELS)
+    down = clean.replace("The price stood at {{last}}", "The stock closed down {{chg1}}")
+    made, shown, drawn = flow.desk_run(desk, bundles.unfinished(), down)
+    assert shown.rc == 1 and drawn is None and shown.lines == [
+        'FIX why: D_NOTE the session may be unfinished: say "the price", not "close" | try: '
+        'the price'], shown.out
+    # The other order, the day's move first and "at the close" after it, says the same and
+    # used to pass.
+    after = clean.replace("The price stood at {{last}} on {{as_of}}.",
+                          "It was {{chg1|dir}} at the close on {{as_of}}.")
+    assert after != clean
+    made, shown, drawn = flow.desk_run(desk, bundles.unfinished(), after)
+    assert shown.rc == 1 and drawn is None and shown.lines == [
+        'FIX why: D_NOTE the session may be unfinished: say "the price", not "close" | try: '
+        'the price'], shown.out
+    made, shown, drawn = flow.desk_run(desk, bundles.bundle(), after)
+    _, _, doc = flow.check_report(desk, made, shown, drawn)
+    assert re.search(r" It was \d+\.\d\d% (up|down) at the close on 2026-11-10\.$", doc["why"])
+    # The previous close is a finished session's: a move measured from it is printed, with
+    # the label of the fact that is named.
+    since = clean.replace("The price stood at {{last}} on {{as_of}}.",
+                          "It is {{chg1|dir}} from the previous close ({{chg1|label}}).")
+    assert since != clean
+    made, shown, drawn = flow.desk_run(desk, bundles.unfinished(), since)
+    brief, _, doc = flow.check_report(desk, made, shown, drawn)
+    move = brief["facts"]["chg1"]["t"]
+    assert doc["why"].endswith(" It is %s %s from the previous close (one-day change %s)." % (
+        move.lstrip("+-"), "down" if move.startswith("-") else "up", move))
+
+
+# --- a follow-up request that failed is not data the source lacks ----------------------
+
+FAILED_REQUESTS = {
+    # what happened: (the bundle, the end of the DATA line, the statement note, the
+    # headline note)
+    "both failed": (bundles.rate_limited, "headlines=failed statements=failed", "failed",
+                    "failed"),
+    "the headlines failed": (lambda: bundles.rate_limited(statements=False),
+                             "headlines=failed statements=ok", None, "failed"),
+    "the statements failed": (lambda: bundles.rate_limited(news=False),
+                              "headlines=3 statements=failed", "failed", None),
+    "another status": (lambda: bundles.rate_limited(label="HTTP 503"),
+                       "headlines=failed statements=failed", "failed", "failed"),
+    "an answer that is not the data": (lambda: bundles.rate_limited(label="unexpected answer"),
+                                       "headlines=failed statements=failed", "failed", "failed"),
+    "the source has neither": (lambda: bundles.bundle(seed=27, news=0, with_statements=False),
+                               "headlines=0 statements=absent", "absent", "absent"),
+}
+STATEMENT_NOTES = {
+    "failed": "The statement request failed, so these facts are absent: %s.",
+    "absent": "The source gave no statement figure, so these facts are absent: %s."}
+HEADLINE_NOTES = {"failed": "The headline request failed.",
+                  "absent": "No headlines came with this data."}
+
+
+@pytest.mark.parametrize("name", sorted(FAILED_REQUESTS))
+def test_a_request_that_failed_is_named_as_failed_from_the_data_line_to_the_page(desk, name):
+    """The bars arrived and a request after them did not. The notes used to read as if the
+    source had no statement figure and no headline for the symbol."""
+    make, counts, statements, headlines = FAILED_REQUESTS[name]
+    bundle = make()
+    line = flow.download(desk, bundle)
+    assert line == "DATA ok TEST bars=260 " + counts
+    made, shown, drawn = flow.desk_run(desk, bundle, draft_for(bundle))
+    brief, report, _ = flow.check_report(desk, made, shown, drawn)
+    wanted = []
+    if statements:
+        wanted.append(STATEMENT_NOTES[statements] % flow.STATEMENT_FACTS)
+    if headlines:
+        wanted.append(HEADLINE_NOTES[headlines])
+    assert [note["text"] for note in brief["notes"]] == wanted
+    # The flags, which decide the roles that run, are the same for failed and for absent.
+    assert brief["flags"] == ["statements_absent"] * bool(statements) + [
+        "no_headlines"] * bool(headlines)
+    # The report, the page and the fact sheet carry the sentence as the brief has it.
+    notes = flow.data_notes(report)
+    assert [flow.md(text) for text in wanted] == notes[:len(wanted)]
+    assert notice(desk) == wanted
+    for number, text in enumerate(wanted, 1):
+        assert "n%d | %s" % (number, text) in made.lines
+    assert verify(desk).lines == ["VERIFY ok"]
+
+
+# --- only a company has statements -----------------------------------------------------
+
+NO_STATEMENTS = {
+    "a fund": lambda: bundles.bundle(seed=41, typ="ETF", symbol="FUND", with_statements=False),
+    "a mutual fund": lambda: bundles.bundle(seed=42, typ="MUTUALFUND", symbol="MFUNDX",
+                                            with_statements=False),
+    "an index": bundles.zero_volume,
+    "a coin": bundles.crypto,
+}
+
+
+@pytest.mark.parametrize("name", sorted(NO_STATEMENTS))
+def test_an_instrument_that_is_not_a_share_is_asked_for_no_statements(desk, name):
+    """A fund, an index and a coin have no statements, and the source answered that request
+    with ten empty lists. It is not sent any more: two requests, and a DATA line, a note and
+    a page that say the figures are absent, not that a request failed."""
+    bundle = NO_STATEMENTS[name]()
+    symbol, bars = bundle["symbol"], len(bundle["chart"]["timestamp"])
+    assert not flow.statements_asked(bundle) and not any(bundle["statements"].values())
+    # The stand-in would answer a third request with a share's figures, so a bundle without
+    # them means that the request was not sent.
+    chart, search, _ = flow.source_answers(bundle)
+    figures = flow.source_answers(bundles.bundle(symbol=symbol))[2]
+    assert b"reportedValue" in figures[2]
+    done = flow.run_get_data(desk, symbol, (chart, search, figures))
+    assert (done.rc, done.err, done.pauses) == (0, "", []), done.err
+    assert len(done.asked) == 2 and not any("/timeseries/" in url for url in done.asked)
+    assert "/v8/finance/chart/" in done.asked[0] and "/v1/finance/search?" in done.asked[1]
+    assert done.out == "DATA ok %s bars=%d headlines=3 statements=absent\n" % (symbol, bars)
+    assert json.loads(flow.read(desk / "bundle.json")) == bundle
+    assert bundle["errors"] == {"news": None, "statements": None}
+
+    # whole_run downloads once more, with the same count of requests, and checks the rest.
+    brief, report, _, sheet = whole_run(desk, bundle)
+    note = STATEMENT_NOTES["absent"] % flow.STATEMENT_FACTS
+    assert "statements_absent" in brief["flags"]
+    said = [x for x in brief["notes"] if x["text"] == note]
+    assert len(said) == 1 and "%s | %s" % (said[0]["id"], note) in sheet
+    assert flow.md(note) in flow.data_notes(report)
+    assert "request failed" not in report and "request failed" not in "\n".join(sheet)
+    root = page_of(desk)
+    assert root.find("section", "fd") == [] and note in notice(desk)
+    assert "%s %s yahoo-chart" % (brief["type"], flow.MID) in root.one("section", "rc").text()
+
+
+@pytest.mark.parametrize("named", [True, False], ids=["a share", "no type in the answer"])
+def test_a_share_or_an_instrument_of_no_named_type_is_asked_for_statements(desk, named):
+    bundle = bundles.bundle(seed=43)
+    if not named:
+        del bundle["chart"]["meta"]["instrumentType"]
+    assert flow.statements_asked(bundle)
+    done = flow.run_get_data(desk, "TEST", flow.source_answers(bundle))
+    assert (done.rc, done.err) == (0, "") and len(done.asked) == 3
+    assert "/ws/fundamentals-timeseries/v1/finance/timeseries/TEST?" in done.asked[2]
+    assert done.out == "DATA ok TEST bars=260 headlines=3 statements=ok\n"
+    brief, _, _, _ = whole_run(desk, bundle)
+    assert brief["type"] == ("EQUITY" if named else "UNKNOWN") and brief["flags"] == []
+    assert "pe_trailing" in brief["facts"]
+    assert len(page_of(desk).one("section", "fd").one("div", "fu").kids) == 8
 
 
 # --- the row shapes seen live from the data source (OBSERVED-SHAPES.md) ----------------
@@ -384,8 +609,13 @@ def test_shape_c_an_empty_finished_session_cuts_the_view_and_both_outputs_say_so
         "Desk view at the 2026-11-06 close (the data source is behind) ")
     assert notice(desk) == [note]
     assert root.one("section", "s4").one("small").text().endswith(
-        "to 2026-11-06. 50d and 200d are the 50-day and 200-day averages. Dashed lines are "
-        "the report's levels.")
+        "to 2026-11-06. 50d and 200d: the 50-day and 200-day averages. Dashed lines: the "
+        "report's levels.")
+    # Read back, the dates are the brief's; in the file their hyphens are the ones that do
+    # not break, so "2026-11-" and "06" cannot end up on two lines.
+    page = flow.read(desk / "report.html")
+    assert "Desk view at the 2026&#8209;11&#8209;06 close (the data source is behind)" in page
+    assert "to 2026&#8209;11&#8209;06. 50d and 200d" in page and "2026-11-0" not in page
 
 
 def test_shape_c_a_session_in_progress_with_no_bar_yet_is_not_called_behind(desk):
@@ -394,7 +624,7 @@ def test_shape_c_a_session_in_progress_with_no_bar_yet_is_not_called_behind(desk
     brief, report, _, _ = whole_run(desk, bundle)
     assert (brief["as_of"], brief["session"], brief["flags"]) == ("2026-11-09", "finished", [])
     note = ("The source has no complete prices for 2026-11-10 yet, so this view ends at "
-            "2026-11-09. That session was not over at the fetch.")
+            "2026-11-09. Its prices were not final at the fetch.")
     assert [n["text"] for n in brief["notes"]] == [note] and note in flow.data_notes(report)
     assert "the source is behind" not in report
     # No flag, so no notice strip; the note is in the page's receipts.
@@ -454,6 +684,67 @@ def test_shape_f_a_fetch_after_the_session_end_is_a_finished_session(desk):
     brief, report, _, _ = whole_run(desk, bundle)
     assert (brief["as_of"], brief["session"], brief["flags"]) == ("2026-11-10", "finished", [])
     assert "Desk view at the 2026-11-10 close" in report
+
+
+@pytest.mark.parametrize("quote, fetch, session", [
+    (-900, 240, "unfinished"), (-900, 1799, "unfinished"), (-900, 1800, "finished"),
+    (1, 240, "finished"), (None, 240, "finished"), (None, -1, "unfinished")],
+    ids=["an old quote, minutes after the bell", "an old quote, just under half an hour",
+         "an old quote, half an hour on", "a quote from after the bell", "no quote time",
+         "no quote time, before the bell"])
+def test_shape_f_minutes_after_the_bell_the_source_may_still_show_an_older_price(
+        desk, quote, fetch, session):
+    """The source's quote can be a quarter of an hour old. A fetch four minutes after the
+    bell with a quote from before it used to be called a finished session, and the report
+    named a price from before the bell as the close. The session is over once the quote is
+    from the end or later, or half an hour has passed; with no quote time the fetch time
+    decides, as before."""
+    bundle = bundles.bundle(seed=34, session="unfinished")
+    meta = bundle["chart"]["meta"]
+    end = meta["currentTradingPeriod"]["regular"]["end"]
+    bundle["fetched_at"] = end + fetch
+    if quote is None:
+        del meta["regularMarketTime"]
+    else:
+        meta["regularMarketTime"] = end + quote
+    brief, report, _, _ = whole_run(desk, bundle)
+    live = session == "unfinished"
+    assert (brief["as_of"], brief["session"]) == ("2026-11-10", session)
+    assert brief["flags"] == ["unfinished_session"] * live
+    header = report.split("\n\n")[1]
+    assert header.startswith("Desk view at the 2026-11-10 %s%s" % (
+        "last price" if live else "close", DOT))
+    line = page_of(desk).one("header").one("p").text()
+    assert line.startswith("Desk view on 2026-11-10, session unfinished " if live
+                           else "Desk view at the 2026-11-10 close ")
+    assert bool(notice(desk)) == live
+
+
+@pytest.mark.parametrize("make", [bundles.crypto, bundles.unfinished], ids=["a coin", "a share"])
+def test_a_live_price_outside_the_days_published_range_reaches_the_report(desk, make):
+    """Seen live for a coin: the source's last price is newer than its day-high field, so the
+    close of the row in progress stood above that row's own high, and the run stopped with
+    E_OHLC. The range of a row in progress is widened to hold its open and close; a row of a
+    finished session with the same fault still stops the run."""
+    bundle = make()
+    chart = bundle["chart"]
+    price = round(chart["high"][-1] * 1.0007, 2)
+    assert price > chart["high"][-1]
+    chart["close"][-1] = chart["meta"]["regularMarketPrice"] = price
+    brief, report, _, sheet = whole_run(desk, bundle)
+    facts = brief["facts"]
+    assert brief["session"] == "unfinished" and "unfinished_session" in brief["flags"]
+    assert facts["last"]["v"] == facts["high.0"]["v"] == price
+    assert facts["low.0"]["v"] == chart["low"][-1]
+    assert "high.0 | %s | %s" % (facts["high.0"]["label"], facts["last"]["t"]) in sheet
+    assert "**%s %s**" % (facts["last"]["t"], brief["unit"]) in report.split("\n\n")[1]
+
+    # The same row once its session is over: the data is wrong, and the run stops.
+    done = bundles.bundle(seed=20)
+    done["chart"]["close"][-1] = round(done["chart"]["high"][-1] * 1.0007, 2)
+    made, shown, drawn = flow.desk_run(desk, done, draft_for(done))
+    assert shown is None and drawn is None and made.rc == 2 and made.out == ""
+    assert len(made.err_lines) == 1 and made.err_lines[0].startswith("STOP E_OHLC "), made.err
 
 
 # --- stops -----------------------------------------------------------------------------
@@ -538,15 +829,16 @@ def test_the_no_network_route_gives_the_same_figures_without_get_data(tmp_path, 
     assert root.one("header").one("p").text().endswith(" Prices from a file")
     assert "fetched" not in report.split("**Data notes**")[0]
     assert "fetched" not in flow.read(folder / "report.html").lower()
-    assert "These prices came from a file, so the time they were downloaded is not known." in [
+    assert "These prices came from a file; when they were downloaded is not known." in [
         note["text"] for note in brief["notes"]]
     # The session is not known to be over, so the draft may not call the price a close.
     closed = draft.replace("The price stood at {{last}}", "The stock closed at {{last}}")
     (folder / "closed.txt").write_bytes(closed.encode("ascii"))
     refused = flow.run(folder / "render.py", folder / "brief.json", folder / "closed.txt",
                        folder / "closed.md", folder / "closed.json")
-    assert refused.rc == 1 and len(refused.lines) == 1, refused.out
-    assert refused.lines[0].startswith("FIX why: D_NOTE "), refused.lines
+    assert refused.rc == 1 and refused.lines == [
+        'FIX why: D_NOTE the session may be unfinished: say "the price", not "close" | try: '
+        'the price'], refused.out
     assert not (folder / "closed.md").exists()
     assert notice(folder) == [note["text"] for note in brief["notes"]]
     assert root.find("section", "fd") == [] and root.find("section", "hd") == []
@@ -605,6 +897,40 @@ def test_a_headline_with_a_quote_in_it_stays_one_quotation(desk):
     assert verify(desk).lines == ["VERIFY ok"]
 
 
+def test_a_headline_with_typographic_quotes_or_unseen_characters_is_the_plain_one(tmp_path):
+    """render.py makes a plain double quote in a title a single one, so that the quotation
+    ends where it should. A typographic or fullwidth quote reached it untouched, and to the
+    eye it closed the quotation; characters that print nothing and marks that reorder what
+    follows came through as well. get_data.py writes the plain quote and drops the others,
+    so the bundle is the one a source with plain text gives."""
+    bundle = bundles.bundle(seed=28)
+    plain = 'Test Instruments falls 9%" and the desk sees RSI(14) at 12.00, a "strong buy'
+    sent = ("Test Instruments falls 9%\u201d and the desk sees RSI\u200b(14) at 12.00, a "
+            "\uff02str\u200dong\u202e buy\u2066\ufeff")
+    bundle["news"] = [{"title": plain, "publisher": "Example Wire",
+                       "time": bundle["fetched_at"] - 3600, "tickers": ["TEST"]}]
+    chart, search, series = flow.source_answers(bundle)
+    status, headers, body = search
+    doc = json.loads(body)
+    assert doc["news"][0]["title"] == plain
+    doc["news"][0].update(title=sent, publisher="Example\u200f Wire\u202c")
+    folder = flow.copy_scripts(tmp_path / "typographic")
+    done = flow.run_get_data(folder, "TEST", (
+        chart, (status, headers, json.dumps(doc).encode("ascii")), series))
+    assert (done.rc, done.err) == (0, ""), done.err
+    assert done.out == "DATA ok TEST bars=260 headlines=1 statements=ok\n"
+    saved = json.loads(flow.read(folder / "bundle.json"))
+    assert saved["news"][0]["title"] == plain and saved == bundle
+    # So the report quotes it as one quotation, as it does the plain title.
+    made, shown, drawn = flow.desk_run(folder, saved, draft_for(saved))
+    brief, report, doc = flow.check_report(folder, made, shown, drawn)
+    said = ("\"Test Instruments falls 9%' and the desk sees RSI(14) at 12.00, a 'strong buy\" "
+            "(Example Wire, 2026-11-10)")
+    assert doc["bear"]["also"] == "The newest headline, %s, does not explain the move." % said
+    assert said.count('"') == 2 and report.count(flow.md(said)) == 2
+    assert verify(folder).lines == ["VERIFY ok"]
+
+
 def test_statement_money_says_its_currency_and_its_date_in_both_outputs(desk):
     """Prices in pence, market value in pounds, revenue in dollars, and a P/E from last year:
     the report used to print the bare numbers under a header that named only pence."""
@@ -639,6 +965,40 @@ def test_statement_money_says_its_currency_and_its_date_in_both_outputs(desk):
              page_of(desk).one("section", "fd").one("div", "fu").kids}
     assert tiles["market value"].kids[1].text() == facts["mcap"]["t"]
     assert tiles["trailing P/E"].kids[2].text() == "as of " + old
+
+
+def test_figures_in_two_currencies_make_no_ratio_and_both_outputs_say_which_is_absent(tmp_path):
+    """Net income in euros over revenue in dollars is not a margin, and a quarter in dollars
+    against the same quarter a year earlier in euros is not growth. Both used to be computed
+    from the bare numbers. The facts are absent now, and the note names them."""
+    whole = bundles.bundle(seed=29)
+    mixed = bundles.bundle(seed=29)
+    for entry in mixed["statements"]["trailingNetIncome"]:
+        entry["currency"] = "EUR"
+    mixed["statements"]["quarterlyTotalRevenue"][0]["currency"] = "EUR"
+    seen = {}
+    for name, bundle in (("one currency", whole), ("two currencies", mixed)):
+        folder = flow.copy_scripts(tmp_path / name)
+        brief, report, _, sheet = whole_run(folder, bundle)
+        tiles = [tile.kids[0].text() for tile in
+                 page_of(folder).one("section", "fd").one("div", "fu").kids]
+        seen[name] = (brief, flow.data_notes(report), sheet, tiles)
+    brief, notes, sheet, tiles = seen["one currency"]
+    assert {"margin_ttm", "rev_q_yoy", "ni_q_yoy", "debt_equity"} <= set(brief["facts"])
+    assert brief["notes"] == [] and "net margin, trailing 12 months" in tiles
+    brief, notes, sheet, tiles = seen["two currencies"]
+    facts = brief["facts"]
+    assert facts["ni_ttm"]["t"].endswith(" EUR") and facts["rev_ttm"]["t"].endswith(" USD")
+    assert "margin_ttm" not in facts and "rev_q_yoy" not in facts
+    # The same two figures in one currency still give their fact.
+    assert "ni_q_yoy" in facts and "debt_equity" in facts
+    note = ("The source gave no statement figure, so these facts are absent: margin_ttm, "
+            "rev_q_yoy.")
+    assert [n["text"] for n in brief["notes"]] == [note] and brief["flags"] == []
+    assert flow.md(note) in notes and "n1 | " + note in sheet
+    assert not any(line.startswith(("margin_ttm | ", "rev_q_yoy | ")) for line in sheet)
+    assert "net margin, trailing 12 months" not in tiles
+    assert "net income, trailing 12 months" in tiles
 
 
 def test_the_checked_report_does_not_need_the_page_script(tmp_path):

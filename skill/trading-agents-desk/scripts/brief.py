@@ -7,9 +7,9 @@ import re
 import sys
 
 VERSION = "2.0.0"
-SELF = "0abec2f52602"
-SIBLINGS = {"get_data.py": "f30054fa5d52", "render.py": "490116451cec", "page.py": "1c1a2d3218a1"}
-KAT = "5260f3b7692a"
+SELF = "62878a98a1c2"
+SIBLINGS = {"get_data.py": "a37ad31f829f", "render.py": "ccbce85fbf5b", "page.py": "e9303bbf9c12"}
+KAT = "431bb405b2bd"
 TYPES = ("EQUITY", "ETF", "CRYPTOCURRENCY", "INDEX", "MUTUALFUND")
 MINOR = {"GBp": "pence", "GBX": "pence", "ZAc": "cents", "ILA": "agorot"}
 COLS = ("open", "high", "low", "close", "volume")
@@ -27,7 +27,7 @@ def stop(code, text, rc=2):
 
 
 def say(line, err=False):
-  # Flushed, so a closed stream fails here and not at exit.
+  # Flushed: a closed stream fails here, not at exit.
   print(line.encode("ascii", "backslashreplace").decode(), file=sys.stderr if err else sys.stdout,
     flush=True)
 
@@ -54,7 +54,7 @@ def clean(s):
 
 
 def mean(x):
-  # Exact for equal values, so a flat window has no spread.
+  # Exact for a flat window: no spread.
   return x[0] if min(x) == max(x) else math.fsum(x) / len(x)
 
 
@@ -63,7 +63,7 @@ def div(a, b):
 
 
 def ewm(xs, a):
-  # The recursion of pandas ewm(alpha=a, adjust=False).
+  # As pandas ewm(alpha=a, adjust=False).
   out, w, old = [], None, 1.0
   for x in xs:
     if w is None:
@@ -106,7 +106,7 @@ def find(o):
 
 
 def parse(text, opt):
-  """Return (bundle or {}, meta, rows, symbol, currency) for any of the three shapes."""
+  """Return (bundle or {}, meta, rows, symbol, currency) for each input shape."""
   try:
     doc = json.loads(text, parse_float=num, parse_constant=lambda s: None)
   except ValueError:
@@ -121,7 +121,6 @@ def parse(text, opt):
   sym, cur = opt.get("symbol"), opt.get("currency")
   hist = find(doc)
   if hist:
-    # The file's own symbol and currency win over the options.
     rows = [[r[k] for k in key] for r in hist["history"]]
     return {}, {}, rows, hist["symbol"], hist.get("currency")
   lines = [x.split(",") for x in text.splitlines() if x.strip()]
@@ -133,9 +132,9 @@ def parse(text, opt):
 
 
 def build(doc, meta, rows, sym, cur):
-  """Validate the rows in the contract's order, then return (brief, fact sheet lines)."""
+  """Validate the rows, then return (brief, fact sheet lines)."""
   sym = str(sym).upper()
-  if not re.fullmatch(r"[A-Z0-9.^=-]{1,15}", sym):
+  if not re.fullmatch(r"(?=.*[A-Z0-9])[A-Z0-9.^=-]{1,15}", sym):
     stop("E_SYMBOL", "the symbol is not a plain ticker")
   raw = [[when(r[0])] + [num(x) for x in r[1:]] for r in rows]
   typ, off = meta.get("instrumentType"), int(meta.get("gmtoffset") or 0)
@@ -145,7 +144,7 @@ def build(doc, meta, rows, sym, cur):
   crypto = typ == "CRYPTOCURRENCY"
   fetched = int(doc["fetched_at"]) if doc else 0
   if not doc and sum(r[0] % 86400 >= 72000 for r in raw) > 1:
-    # Late in the UTC day and no exchange offset: the date may be the next.
+    # Late in the UTC day, no exchange offset: maybe the next date.
     stop("E_DATES", "this price history does not say which day each row belongs to")
   flags, notes = [], []
 
@@ -160,28 +159,32 @@ def build(doc, meta, rows, sym, cur):
   def date(row):
     return iso(day(row[0]))
 
+  price, stamp = meta.get("regularMarketPrice"), meta.get("regularMarketTime")
+
   def unfinished(t):
-    # None when the session facts are missing.
+    # None without session facts. The source's quote can be 15 minutes old.
     p = (meta.get("currentTradingPeriod") or {}).get("regular") or {}
     if crypto:
       return t // 86400 >= fetched // 86400
     if "start" in p and "end" in p:
-      return t >= p["start"] and fetched < p["end"]
+      end = p["end"]
+      return t >= p["start"] and (stamp or fetched) < end and fetched < end + 1800
 
-  # Same day: sorted so that a date's newest complete row comes last, and the last one stays.
+  # Per date, the newest complete row is kept.
   raw.sort(key=lambda r: (day(r[0]), None not in r, r[0]))
   daily = list({day(r[0]): r for r in raw}.values())
-  price, stamp = meta.get("regularMarketPrice"), meta.get("regularMarketTime")
   for r in daily[-1:]:
-    # Fill: a missing newest close is that day's last regular price, if in the row's range.
+    # Fill: a missing newest close is the last regular price, if in range.
     if (r[4] is None and r.count(None) == 1 and unfinished(r[0]) is False and not crypto
         and price and stamp and day(stamp) == day(r[0])
         and r[3] * 0.9999 <= price <= r[2] * 1.0001):
       r[4] = float(price)
       note("The source had no close for %s yet; it is filled from the exchange's last regular "
         "price." % date(r), "close_filled")
-  # Rows: an older row with a missing value is left out. Behind: one among the newest 3 ends
-  # the view before it, flagged unless its session is the one in progress.
+    elif None not in r and unfinished(r[0]):
+      # A live price can pass the day's high or low.
+      r[2], r[3] = max(r[1:5]), min(r[1:5])
+  # An older row with a missing value is left out; one among the newest 3 ends the view.
   keep = []
   for i, r in enumerate(daily):
     if None not in r:
@@ -193,7 +196,7 @@ def build(doc, meta, rows, sym, cur):
       text = "The source has no complete prices for %s yet, so this view ends at %s." % (
         date(r), date(keep[-1]))
       if unfinished(r[0]):
-        note(text + " That session was not over at the fetch.")
+        note(text + " Its prices were not final at the fetch.")
       else:
         if price and stamp:
           text += " The source's last regular price is %s, dated %s." % (
@@ -201,7 +204,6 @@ def build(doc, meta, rows, sym, cur):
         note(text, "prices_behind")
       break
   for t, o, h, lo, c, v in keep:
-    # 0.01% of slack, as for the fill.
     if min(o, h, lo, c) <= 0 or v < 0 or lo * 0.9999 > min(o, c) or h * 1.0001 < max(o, c):
       stop("E_OHLC", "the prices for %s are impossible (zero, negative or outside the day's range)"
         % iso(day(t)))
@@ -209,7 +211,8 @@ def build(doc, meta, rows, sym, cur):
   if n < 60:
     stop("E_FEW", "only %d usable daily rows; the desk needs at least 60" % n)
   D = [date(r) for r in keep]
-  # Gaps count between the newest 60 rows.
+  # A bar on every day: 365 a year.
+  yr = 365 if day(keep[-1][0]) - day(keep[-60][0]) < 68 else 252
   for i in range(n - 59, n):
     gap, ends = day(keep[i][0]) - day(keep[i - 1][0]), (D[i - 1], D[i])
     if gap > (1 if crypto else 12):
@@ -236,7 +239,7 @@ def build(doc, meta, rows, sym, cur):
   if live is None:
     note("The source gave no session times, so the newest row may not be final.")
   if not doc:
-    note("These prices came from a file, so the time they were downloaded is not known.")
+    note("These prices came from a file; when they were downloaded is not known.")
   if live:
     note("The session of %s was unfinished at the fetch: its price, range and volume are not "
       "final." % D[-1], "unfinished_session")
@@ -338,11 +341,11 @@ def build(doc, meta, rows, sym, cur):
     F("ret%d" % k, pc(c[-1], c[-1 - k]) if n > k else None, "%d-day return" % k, "pct", 1)
   r = [c[i] / c[i - 1] - 1 for i in range(n - 21, n)]
   m = mean(r)
-  F("vol21", 100 * math.sqrt(math.fsum((x - m) ** 2 for x in r) / 20) * math.sqrt(252),
+  F("vol21", 100 * math.sqrt(math.fsum((x - m) ** 2 for x in r) / 20) * math.sqrt(yr),
     "21-day annualised volatility", "pct")
 
   for k, fn in (("high", max), ("low", min)):
-    x = fn(c[-252:]) if n >= 200 else None
+    x = fn(c[-yr:]) if n > yr * .79 else None
     i = n - 1 - c[::-1].index(x) if x else 0
     F(k + "52", x, "52-week %s close" % k, "price")
     F(k + "52_date", x and D[i], "date of the 52-week %s close" % k, "date")
@@ -362,18 +365,18 @@ def build(doc, meta, rows, sym, cur):
   def one(k, key, label, kind="money"):
     s = sorted((when(e["asOf"]) // 86400, e["value"], clean(e.get("currency"))[:3])
       for e in st.get(key) or [] if e.get("value") is not None)
-    # A money figure names its currency, often not the price's.
+    # A money figure names its own currency.
     F(k, s[-1][1] if s else None, label, kind, as_of=s and iso(s[-1][0]),
       unit=" " + s[-1][2] if s and s[-1][2] and kind == "money" else "")
     return s
 
   def two(k, a, b, label):
-    # Only when both figures carry the same date.
-    ok = a and b and a[-1][0] == b[-1][0] and b[-1][1] > 0
+    # Only for the same date and currency.
+    ok = a and b and a[-1][::2] == b[-1][::2] and b[-1][1] > 0
     F(k, 100 * a[-1][1] / b[-1][1] if ok else None, label, "pct", as_of=ok and iso(a[-1][0]))
 
   def yoy(k, s, label):
-    old = [x for d, x, _ in s if abs(s[-1][0] - 365 - d) <= 20]
+    old = [x for d, x, u in s if abs(s[-1][0] - 365 - d) <= 20 and u == s[-1][2]]
     ok = old and old[0] > 0
     F(k, pc(s[-1][1], old[0]) if ok else None, label + " against a year earlier", "pct", 1,
       ok and iso(s[-1][0]))
@@ -393,10 +396,11 @@ def build(doc, meta, rows, sym, cur):
   two("debt_equity", debt, one("equity", "quarterlyStockholdersEquity", "shareholders' equity"),
     "debt to equity")
 
-  stm = miss[price_facts:]
+  err, stm = doc.get("errors") or {}, miss[price_facts:]
   for t, ks, flag in (
       ("Too little history (%d daily rows) or a division by zero" % n, miss[:price_facts], 0),
-      ("The source gave no statement figure", stm, len(stm) > 13 and "statements_absent")):
+      ("The statement request failed" if err.get("statements") else
+        "The source gave no statement figure", stm, len(stm) > 13 and "statements_absent")):
     if ks:
       note("%s, so these facts are absent: %s." % (t, ", ".join(ks)), flag)
   heads = []
@@ -406,7 +410,8 @@ def build(doc, meta, rows, sym, cur):
         "id": "h%d" % (len(heads) + 1), "date": iso(day(int(x["time"]))) if x.get("time") else "",
         "publisher": clean(x.get("publisher"))[:60], "title": clean(x["title"])[:160]})
   if not heads:
-    note("No headlines came with this data.", "no_headlines")
+    note("The headline request failed." if err.get("news") else
+      "No headlines came with this data.", "no_headlines")
   k = max(0, n - 120)
   b = {
     "schema": "brief.v1", "version": VERSION, "symbol": sym,
@@ -431,16 +436,14 @@ def build(doc, meta, rows, sym, cur):
 def digest(path):
   with open(path, "rb") as f:
     lines = f.read().splitlines()
-  t = b"\n".join(x.rstrip() for x in lines
-    if not re.fullmatch(b'SELF = "[0-9a-f]{12}"', x.rstrip()))
+  t = b"\n".join(re.sub(b'^SELF = "[0-9a-f]{12}"$', b"SELF", x.rstrip()) for x in lines)
   return hashlib.sha256(t.rstrip()).hexdigest()[:12]
 
 
 def kat():
-  # Known-answer test on a fixed series.
-  rows = [(86400 * (20000 + i), 50 + i % 7, 60 + i % 4, 45 + i % 3, 50 + i % 9, 1000 + i % 11)
+  rows = [(120960 * (20000 + i), 50 + i % 7, 60 + i % 4, 45 + i % 3, 50 + i % 9, 1000 + i % 11)
     for i in range(260)]
-  facts = build({"fetched_at": 86400 * 20260}, {}, rows, "KAT", "USD")[0]["facts"]
+  facts = build({"fetched_at": 86400 * 28363}, {}, rows, "KAT", "USD")[0]["facts"]
   return hashlib.sha256("|".join(f["t"] for f in facts.values()).encode()).hexdigest()[:12]
 
 
@@ -452,11 +455,11 @@ def run(a, safe):
   found = []
   for name in sorted(stamps):
     try:
-      path = __file__ if name == "brief.py" else pre.rstrip("/\\") + "/" + name
+      path = __file__ if name == "brief.py" else pre + "/" + name
       ok = stamps[name] in ("0" * 12, digest(path))
       found.append(name)
     except OSError:
-      # Only render.py must be there: the download and the page are optional steps.
+      # These two are optional.
       ok = name in ("get_data.py", "page.py")
     if not ok:
       stop("E_SELF" if name == "brief.py" else "E_SIBLING",
@@ -508,7 +511,7 @@ def main(argv):
     say("ERROR E_USAGE cannot read the input file or write the output file", 1)
     return 4
   except Exception:
-    # Before the integrity check passes, any failure means a damaged copy.
+    # Before the integrity check passes, a failure is a damaged copy.
     say("STOP E_INPUT " + E_INPUT if safe else "ERROR E_SELF this copy of brief.py is damaged", 1)
     return 2 if safe else 3
 

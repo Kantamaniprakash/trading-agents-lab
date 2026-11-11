@@ -275,11 +275,11 @@ def test_imports_and_calls_stay_inside_the_allowlist():
 
 
 def contract_hash(text):
-    """Section 1: SHA-256 of the bytes without the one stamp line SELF = "<12 hex>", LF
-    endings, no trailing whitespace; first 12 hex digits."""
+    """Section 1: SHA-256 of the bytes with LF endings and no trailing whitespace, each line
+    that is exactly SELF = "<12 hex>" read as the one word SELF; first 12 hex digits."""
     data = text.encode("utf-8") if isinstance(text, str) else text
     lines = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
-    kept = [x.rstrip() for x in lines if not re.fullmatch(rb'SELF = "[0-9a-f]{12}"', x.rstrip())]
+    kept = [re.sub(rb'^SELF = "[0-9a-f]{12}"$', b"SELF", x.rstrip()) for x in lines]
     return hashlib.sha256(b"\n".join(kept).rstrip()).hexdigest()[:12]
 
 
@@ -347,7 +347,7 @@ def test_report_layout_is_in_the_contract_order(name):
         "|  | Bull | Bear |\n",
         "| **Core claim** | ", "| **Best evidence** | ", "| **Also** | ", "| **Weak point** | ",
         "**What would change this view**\n",
-        "| Level | Price | From last %s | Would support |\n" % px[-5:],
+        "| Level | Price | To reach it | Would support |\n",
         "**Risk review.** ",
         "**Data notes**\n",
         "- The desk started from no position.\n",
@@ -371,10 +371,13 @@ def test_report_layout_is_in_the_contract_order(name):
 def test_header_says_close_only_for_a_finished_session(ordinary, live):
     done, open_ = rendered(ordinary)["markdown"], rendered(live)["markdown"]
     assert "Desk view at the 2026-11-10 close &#183;" in done
-    assert "| From last close |" in done
     assert "Desk view at the 2026-11-10 last price &#183;" in open_
-    assert "| From last price |" in open_
     assert "close &#183;" not in open_
+    # The levels table is headed the same way in every session. Its third column was headed
+    # "From last close" or "From last price".
+    for md in (done, open_):
+        assert md.count("| Level | Price | To reach it | Would support |\n") == 1
+        assert "From last" not in md
     unknown = dict(ordinary, session="unknown")
     assert "2026-11-10 last price &#183;" in rendered(unknown)["markdown"]
 
@@ -776,6 +779,22 @@ def test_levels_table_prints_label_price_gap_and_side(ordinary):
          "Bear, if lost"]]
 
 
+def test_the_levels_table_says_how_far_the_price_must_move_to_reach_each_level(ordinary):
+    # The column is headed "To reach it": a level above the price has a plus, one below it a
+    # minus, and the price itself is no distance away.
+    b = copy.deepcopy(ordinary)
+    last = b["facts"]["last"]["v"]
+    for name, value in (("bb_upper", last * 1.058), ("bb_lower", last * 0.976)):
+        b["facts"][name] = briefs.fact(value, b["facts"][name]["label"], "price")
+    md = rendered(b, levels="\nbb_upper | bull | on a close above\n"
+                            "bb_lower | bear | on a close below\nlast | bull | held")["markdown"]
+    head = md[md.index("| Level |"):].split("\n")[0]
+    assert [c.strip() for c in PIPE.split(head)[1:-1]] == [
+        "Level", "Price", "To reach it", "Would support"]
+    assert [row[2] for row in table_rows(md, "| Level |")] == ["+5.8%", "-2.4%", "+0.0%"]
+    assert "From last" not in md
+
+
 def test_evidence_prints_each_fact_under_its_own_label(ordinary):
     f = ordinary["facts"]
     md = rendered(ordinary, bull_evidence="mfi14, rsi14", bear_evidence="rsi14, mfi14")["markdown"]
@@ -797,7 +816,10 @@ def test_evidence_prints_each_fact_under_its_own_label(ordinary):
     ("MFI: {{rsi14}}.", "mfi14"),
     ("MFI ({{rsi14}}) is low.", "mfi14"),
     ("The MFI reading of {{rsi14}} is low.", "mfi14"),
-    ("mfi {{rsi14|label}} is low.", "mfi14"),
+    ("mfi {{rsi14}} is low.", "mfi14"),
+    # Only a |label reference names itself; any other format is still held to the label.
+    ("An MFI of {{sma50_gap|dir}} is odd.", "mfi14"),
+    ("The previous close {{sma50|gap}} held.", "prev_close"),
     ("RSI {{mfi14}} is low.", "rsi14"),
     ("ADX {{cci20}} shows a trend.", "adx14"),
     ("CCI {{adx14}} is stretched.", "cci20"),
@@ -837,6 +859,138 @@ def test_d_label_alias_with_no_such_fact_in_the_brief():
     b = briefs.bare()
     found = fixes(b, why="The P/E {{rsi14}} is modest.")
     assert codes(found) == ["D_LABEL"]
+    # The same with a |label reference: the name still belongs to no fact of this brief.
+    found = fixes(b, why="The P/E {{rsi14|label}} is modest.")
+    assert [(s, c, hint) for s, c, _, hint in found] == [("why", "D_LABEL", "another fact")]
+
+
+# The bare names render.py reads as an indicator's name. With each: a fact it may stand in
+# front of, and a fact of another indicator.
+ALIASES = [
+    ("RSI", "rsi14", "mfi14"), ("MFI", "mfi14", "rsi14"), ("ADX", "adx14", "cci20"),
+    ("CCI", "cci20", "adx14"), ("MACD", "macd_signal", "rsi14"),
+    ("Stochastic", "stoch_d", "mfi14"), ("P/E", "pe_forward", "peg"),
+    ("ATR", "atr14_pct", "adx14"),
+]
+# Ways of writing the name straight in front of a reference.
+ALIAS_THEN_REFERENCE = [
+    "%s {{%s|label}} is the reading.", "The %s reading of {{%s|label}} matters.",
+    "%s: {{%s|label}}.", "The %s ({{%s|label}}) matters.", "The %s is {{%s|label}} now.",
+    "The %s, {{%s|label}}, matters.",
+]
+
+
+def test_the_alias_table_here_is_the_one_the_script_holds():
+    assert sorted(alias.lower() for alias, _, _ in ALIASES) == sorted(render.ALIAS)
+    b = briefs.ordinary()
+    for alias, own, other in ALIASES:
+        prefix = render.ALIAS[alias.lower()]
+        assert own.startswith(prefix) and not other.startswith(prefix), alias
+        assert b["facts"][own]["v"] != b["facts"][other]["v"]
+
+
+@pytest.mark.parametrize("alias,own,other", ALIASES)
+@pytest.mark.parametrize("form", ALIAS_THEN_REFERENCE)
+def test_d_label_a_label_reference_after_another_indicators_name(ordinary, form, alias, own,
+                                                                 other):
+    # "RSI {{mfi14|label}}" prints "RSI MFI(14) ...": two indicator names for one number. A
+    # |label reference was let through after any words for a while; after an indicator's
+    # bare name it is sent back again.
+    found = fixes(ordinary, why=form % (alias, other))
+    assert [(s, c) for s, c, _, _ in found] == [("why", "D_LABEL")], found
+    assert found[0][2] == '"%s" labels another fact, not %s' % (alias.lower(), other)
+    assert own in found[0][3].split(", ")
+    # Written in small letters or in capitals it is the same name.
+    for typed in (alias.lower(), alias.upper()):
+        assert codes(fixes(ordinary, why=form % (typed, other))) == ["D_LABEL"], typed
+    # The bare value after the name was never let through.
+    bare = (form % (alias, other)).replace("|label", "")
+    assert codes(fixes(ordinary, why=bare)) == ["D_LABEL"], bare
+
+
+@pytest.mark.parametrize("alias,own,other", ALIASES)
+def test_d_label_passes_a_label_reference_the_name_does_not_claim(ordinary, alias, own, other):
+    for text, facts in (
+            # The name in front of a fact of its own.
+            ("%s {{%s|label}} is the reading." % (alias, own), (own,)),
+            # The other order: the reference first. Nothing stands in front of it.
+            ("{{%s|label}} agrees with the %s." % (other, alias), (other,)),
+            ("{{%s|label}} and the %s {{%s|label}} agree." % (other, alias, own), (other, own)),
+            # The name earlier in the sentence, with other words before the reference.
+            ("The %s is weak and {{%s|label}} agrees." % (alias, other), (other,)),
+            ("%s and {{%s|label}} disagree." % (alias, other), (other,)),
+            # Part of a longer word is not the name.
+            ("The x%s {{%s|label}} is odd." % (alias.lower(), other), (other,))):
+        assert fixes(ordinary, why=text) == [], text
+        why = rendered(ordinary, why=text)["why"]
+        for name in facts:
+            assert expected_form(ordinary, name, "label") in why, (text, why)
+
+
+def test_d_label_is_raised_for_the_one_reference_the_name_does_not_fit(ordinary):
+    # This sentence passed while every |label reference was let through. The first reference
+    # stands straight after another indicator's name; the second is that indicator's own.
+    found = fixes(ordinary, why="Momentum agrees with the MFI: {{rsi14|label}} and "
+                                "{{mfi14|label}}.")
+    assert found == [("why", "D_LABEL", '"mfi" labels another fact, not rsi14', "mfi14")]
+    assert fixes(ordinary, why="Momentum agrees: {{rsi14|label}} and {{mfi14|label}}.") == []
+
+
+def test_d_label_a_label_reference_with_the_names_own_value_passes(ordinary):
+    # The rule compares values, as it does for a bare reference: a fact that prints the
+    # number of one of the name's own facts is not another number under a wrong name.
+    b = copy.deepcopy(ordinary)
+    b["facts"]["mfi14"] = briefs.fact(b["facts"]["rsi14"]["v"], "MFI(14)")
+    assert fixes(b, why="RSI {{mfi14|label}} is low.") == []
+    assert codes(fixes(ordinary, why="RSI {{mfi14|label}} is low.")) == ["D_LABEL"]
+
+
+# Plain words that are the label of a fact, in front of a |label reference of another fact.
+PLAIN_LABELS = [
+    ("It is down from the previous close ({{chg1|label}}).", ["chg1"]),
+    ("Against the previous close: {{sma50_gap|label}}.", ["sma50_gap"]),
+    ("Measured from the last close, {{ret5|label}} is small.", ["ret5"]),
+    ("The last close: {{chg1|label}}.", ["chg1"]),
+    ("Total debt, {{equity|label}}, is small.", ["equity"]),
+    ("The data date ({{high52_date|label}}) is near.", ["high52_date"]),
+]
+
+
+@pytest.mark.parametrize("text,names", PLAIN_LABELS)
+def test_d_label_is_not_raised_for_a_label_reference_after_plain_words(ordinary, text, names):
+    # "the previous close ({{chg1|label}})" used to be sent back: the words in front of a
+    # |label reference were read as a label for it, though it prints its own. That holds
+    # for a label in plain words; an indicator's bare name is the case above.
+    f = ordinary["facts"]
+    assert fixes(ordinary, why=text) == []
+    why = rendered(ordinary, why=text)["why"]
+    for name in names:
+        assert "%s %s" % (f[name]["label"], f[name]["t"]) in why, (name, why)
+    # The same words in front of the bare value are still a wrong label.
+    bare = text.replace("|label", "")
+    assert set(codes(fixes(ordinary, why=bare))) == {"D_LABEL"}, bare
+
+
+def test_d_label_plain_words_in_an_unfinished_session(live):
+    # There the newest price is labelled "last price".
+    assert live["facts"]["last"]["label"] == "last price"
+    for text in ("Against the last price ({{chg1|label}}).",
+                 "Measured from the previous close, {{ret1|label}} is small."):
+        assert fixes(live, why=text) == [], text
+        assert codes(fixes(live, why=text.replace("|label", ""))) == ["D_LABEL"], text
+
+
+@pytest.mark.parametrize("text", [
+    "The MACD histogram {{macd|label}} is negative.", "Stochastic J {{stoch_k|label}} is high.",
+    "The forward P/E {{pe_trailing|label}} is modest.",
+    "The trailing P/E {{pe_forward|label}} is modest.",
+])
+def test_d_label_a_longer_label_in_front_of_a_label_reference_is_let_through(ordinary, text):
+    # Held as it is: the longest label in front of the reference decides, and these four
+    # are labels of facts, not bare names, so a |label reference of another fact passes
+    # after them though an indicator is named. The bare value is sent back.
+    assert fixes(ordinary, why=text) == []
+    assert codes(fixes(ordinary, why=text.replace("|label", ""))) == ["D_LABEL"], text
 
 
 # ---------------------------------------------------------------------------------------
@@ -854,6 +1008,8 @@ PHRASES = [
     "It is a sure thing.", "You can't lose.", "You cannot lose.", "It is certain to bounce.",
     "You can\u2019t lose.",
     "Buy now.", "Sell now.", "You must buy.", "Holders must sell.",
+    # A hyphen that does not touch the word joins nothing: this is still the rating.
+    "It is a strong sell - for now.", "A strong buy, on balance.",
 ]
 
 
@@ -876,6 +1032,9 @@ def test_d_phrase_covers_the_listed_wordings():
     "Sellers may return near the band.", "A stop under the band would fail.",
     "The portfolio manager approved it.", "Buyers showed up nowhere.",
     "The case is strong; buying pressure is not.", "Profit taking looks likely.",
+    # A hyphen right after makes another word: a sell-off is a market move, not a rating.
+    "A strong sell-off followed the report.", "The Strong Sell-Off of that week is over.",
+    "A strong buy-in by insiders came first.", "Strong buy-backs support the price.",
 ])
 def test_d_phrase_leaves_plain_analysis_alone(ordinary, text):
     assert fixes(ordinary, risk=text) == []
@@ -898,24 +1057,56 @@ NOTE_TEXTS = [
     "The last close was weak.", "The latest closing price was weak.",
     "It closed at {{last}}.", "The close of {{last}} is weak.", "A close at {{close.0}} hurts.",
     "The close is {{sma50_gap|dir}} its medium average.", "It closed {{chg1|dir}} on the day.",
+    # "closed down" and its kin, with the day's own move after them, used to pass.
+    "It closed down {{chg1}}.", "It closed up {{chg1}} on the day.",
+    "The stock closed lower at {{last}}.", "It closed higher at {{close.0}}.",
+    "Closing down {{ret1}}, it looks weak.", "It closed down at {{last}}, {{chg.0}} on the day.",
 ]
+# The other order: the newest price or the day's move first, then "at the close". These
+# used to pass: only the word before the reference was read.
+NOTE_TEXTS_AFTER = [
+    "It was {{chg1|dir}} at the close.", "The price was {{last}} at the close.",
+    "It moved {{chg1}} at the close.", "{{chg1|label}} at the close.",
+    "{{last|label}} at the closing bell.", "A level {{last|gap}} at the close is no level.",
+    "The price stood at {{ last}} at the Close.", "It was {{chg1|dir}} at the close of trading.",
+]
+NOTE_SAYS = 'the session may be unfinished: say "the price", not "close"'
 
 
-@pytest.mark.parametrize("text", NOTE_TEXTS)
+def test_the_two_orders_of_d_note_are_both_in_the_lists():
+    after = re.compile(r"\{\{ ?(last|chg1)[^}]*\}\} at the clos", re.I)
+    assert all(after.search(text) for text in NOTE_TEXTS_AFTER)
+    assert not any(after.search(text) for text in NOTE_TEXTS)
+    assert {m.group(1) for m in map(after.search, NOTE_TEXTS_AFTER)} == {"last", "chg1"}
+
+
+@pytest.mark.parametrize("text", NOTE_TEXTS + NOTE_TEXTS_AFTER)
 def test_d_note_close_said_of_an_unfinished_session(live, text):
     found = fixes(live, why=text)
     assert [(s, c) for s, c, _, _ in found] == [("why", "D_NOTE")], found
-    assert found[0][3] == "last"
+    # The line names the words to use instead ("last price" stood here once, with the fact
+    # name "last" as the hint).
+    assert found[0][2:] == (NOTE_SAYS, "the price")
 
 
-@pytest.mark.parametrize("text", NOTE_TEXTS)
+@pytest.mark.parametrize("text", NOTE_TEXTS + NOTE_TEXTS_AFTER)
 def test_d_note_only_when_the_session_is_not_known_to_be_finished(ordinary, text):
     assert fixes(ordinary, why=text) == []
     # Session unknown is every price-file run: the newest row may be unfinished, the header
     # says "last price", and the draft may not say "close" either.
     found = fixes(dict(ordinary, session="unknown"), why=text)
     assert [(s, c) for s, c, _, _ in found] == [("why", "D_NOTE")], found
-    assert found[0][2] == 'the session may be unfinished: say "last price", not "close"'
+    assert found[0][2] == NOTE_SAYS
+
+
+def test_d_note_is_one_line_of_the_fixed_form(live, run):
+    r = run(live, briefs.draft(live, risk="It closed down {{chg1}}."))
+    assert r.rc == 1 and r.md is None and r.raw is None
+    assert r.lines == ["FIX risk: D_NOTE %s | try: the price" % NOTE_SAYS]
+    # The words the line gives are accepted, alone or with the fact's own label.
+    for text in ("The price moved {{chg1}} to {{last}}.", "The price: {{last|label}}."):
+        r = run(live, briefs.draft(live, risk=text))
+        assert r.rc == 0 and r.err == [], (text, r.out)
 
 
 def test_d_note_on_a_price_file_brief():
@@ -926,6 +1117,20 @@ def test_d_note_on_a_price_file_brief():
     found = fixes(b, risk="Today's closing price of {{last}} is final.")
     assert [(s, c) for s, c, _, _ in found] == [("risk", "D_NOTE")], found
     assert fixes(b, why="The last price was {{last}} on {{as_of}}.") == []
+    found = fixes(b, why="The stock was {{chg1|dir}} at the close.")
+    assert [(s, c) for s, c, _, _ in found] == [("why", "D_NOTE")], found
+
+
+def test_d_note_in_the_other_order_applies_to_every_prose_slot_and_level_words(live):
+    for slot in ("why", "bull.claim", "bull.also", "bull.weak", "bear.claim", "bear.also",
+                 "bear.weak", "risk"):
+        found = fixes(live, **{slot.replace(".", "_"): "It was {{chg1|dir}} at the close."})
+        assert [(s, c) for s, c, _, _ in found] == [(slot, "D_NOTE")], found
+    found = fixes(live, levels="\nclose.1 | bull | if {{last}} at the close holds above it")
+    assert [(s, c) for s, c, _, _ in found] == [("levels", "D_NOTE")], found
+    # One line for a sentence that says it both ways.
+    found = fixes(live, why="It closed {{chg1|dir}}: {{last}} at the close.")
+    assert [(s, c) for s, c, _, _ in found] == [("why", "D_NOTE")], found
 
 
 @pytest.mark.parametrize("text", [
@@ -933,9 +1138,46 @@ def test_d_note_on_a_price_file_brief():
     "The last price sits {{sma50_gap|dir}} its medium average.",
     "A close above {{close.1}} would help.", "Sellers were close to exhausted.",
     "A reading of {{last}} close to the band.", "On a close above {{last}} the bulls lead.",
+    # The previous close is a finished session's, whatever is measured from it.
+    "It is down from the previous close ({{chg1|label}}).",
+    "Against the previous close: {{chg1|label}}.", "The previous close of {{prev_close}} held.",
+    "Measured from the Previous Close, {{ret1|label}} is small.",
+    # "closed lower" of an earlier session, or with no fact of the newest one after it.
+    "It closed lower on {{date.1}}, at {{close.1}}.", "It closed up while RSI reads {{rsi14}}.",
+    # A reference first, and then a close that is another session's or no close at all.
+    "It is {{chg1|dir}} from where it stood at the previous close.",
+    "It stood at {{prev_close}} at the close of {{date.1}}.",
+    "It was {{close.1}} at the close on {{date.1}}.",
+    "The price is {{last}}; at the close of {{date.1}} it was {{close.1}}.",
+    "The price is {{last}} at the moment, {{chg1|dir}} on the day.",
+    "RSI reads {{rsi14}} at the close of a weak week.",
 ])
 def test_d_note_leaves_other_uses_of_close_alone(live, text):
     assert fixes(live, why=text) == []
+
+
+def test_d_note_previous_close_is_exempt_only_as_those_two_words(live):
+    # The exemption is for "previous close" itself: the same sentence about the close, or
+    # about the last close, is still sent back.
+    for text in ("It is down from the close ({{chg1|label}}).",
+                 "Against the last close: {{chg1|label}}.",
+                 "Previously it closed at {{last}}."):
+        assert codes(fixes(live, why=text)) == ["D_NOTE"], text
+
+
+@pytest.mark.parametrize("text", [
+    "It stood at {{close.0}} at the close.", "It was {{ret1|dir}} at the close.",
+    "It moved {{chg.0}} at the close.", "It was {{chg1|dir}} at close.",
+    "It was {{chg1|dir}} by the close.",
+])
+def test_d_note_in_the_other_order_reads_last_and_chg1_before_at_the_close(live, text):
+    # Held as it is: in this order the rule reads the two names "last" and "chg1" and the
+    # words "at the close" straight after them. The same figures under their other names
+    # (close.0, chg.0, ret1) and other words for the same claim pass.
+    assert fixes(live, why=text) == []
+    # Said the usual way round, each of these figures is caught.
+    name = re.search(r"\{\{([\w.]+)", text).group(1)
+    assert codes(fixes(live, why="It closed at {{%s}}." % name)) == ["D_NOTE"]
 
 
 # ---------------------------------------------------------------------------------------
@@ -967,7 +1209,8 @@ def test_a_level_row_reports_its_fact_and_its_words_in_one_pass(ordinary):
 def test_fix_lines_stay_short_whatever_the_draft_holds(ordinary):
     long = "x" * 5000
     text = briefs.draft(ordinary, bull_evidence="rsi14, %s" % long, why="A%s7 reason." % long[:500],
-                        levels="\n%s | bull | on a close above" % long, risk="See {{%s}}." % long[:400])
+                        levels="\n%s | bull | on a close above" % long,
+                        risk="See {{%s}}." % long[:400])
     text += "[%s] stray\n" % long
     lines = render.desk(ordinary, text)[1]
     found = parse_fixes(lines)
@@ -1580,8 +1823,8 @@ def test_exit_3_for_an_altered_copy(tmp_path, files):
                                     # such a copy passed and then blamed the brief.
                                     ("one at a time", "one at\u00a0a time"),
                                     ("sub-agent.", "sub\u2212agent."),
-                                    # Only the stamp line itself is outside the hash, not
-                                    # any line that starts like it: code on such a line,
+                                    # Only the stamp line itself is read as the word SELF,
+                                    # not any line that starts like it: code on such a line,
                                     # put above the stamp, used to pass.
                                     ("\nSELF = ", '\nSELF = len("added code")\nSELF = '),
                                     ("\nSELF = ", '\nSELF = "000000000000"  # x\nSELF = ')]):
@@ -1598,6 +1841,38 @@ def test_exit_3_for_an_altered_copy(tmp_path, files):
     rc, out, err = cli(*files, script=bad)
     assert rc == 3 and out == b""
     one_line(err, "ERROR E_SELF ")
+
+
+def test_exit_3_for_a_second_a_moved_or_a_missing_stamp_line(tmp_path, files):
+    # The stamp line keeps its place in the hash, as the one word SELF. It used to be left
+    # out of the hash, so each copy below hashed as the untouched one, and those that still
+    # hold a stamp line ran.
+    text = stamped_copy(tmp_path).read_text(encoding="ascii")
+    stamp = re.search(r'(?m)^SELF = "[0-9a-f]{12}"\n', text).group()
+    version, kat = 'VERSION = "2.0.0"\n', re.search(r'(?m)^KAT = "[0-9a-f]{12}"\n', text).group()
+    last = 'if __name__ == "__main__":\n'
+    assert version + stamp + kat in text
+    changes = {
+        "a second stamp line above the stamp": (stamp, 'SELF = "0123456789ab"\n' + stamp),
+        "the stamp line twice": (stamp, stamp + stamp),
+        "the stamp line again near the end": (last, stamp + last),
+        "the stamp line one line up": (version + stamp, stamp + version),
+        "the stamp line one line down": (stamp + kat, kat + stamp),
+        "no stamp line": (stamp, ""),
+    }
+    for i, (what, (old, new)) in enumerate(changes.items()):
+        assert text.count(old) == 1, what
+        bad = tmp_path / ("stamp%d.py" % i)
+        bad.write_bytes(text.replace(old, new).encode("ascii"))
+        # In every copy with a stamp the name SELF still holds the right stamp when the
+        # check runs: only the hash can refuse it.
+        if what != "no stamp line":
+            assert load("render_stamp%d" % i, bad).SELF == stamp[8:20], what
+        for args in (files, ["--version"]):
+            rc, out, err = cli(*args, script=bad)
+            assert rc == 3 and out == b"", (what, err)
+            one_line(err, "ERROR E_SELF ")
+        assert not files[2].exists() and not files[3].exists(), what
 
 
 def test_line_endings_and_trailing_spaces_do_not_break_the_self_check(tmp_path, files):
@@ -2375,9 +2650,13 @@ QUANTITY_TEXTS = [
     ("Zero, eleven, thirteen, ninety, thousands and a trillion.", 6),
     ("About half of it, ten times over, a three-fold rise and twice the range.", 4),
     ("The seventy percent line.", 1),
+    # The plural of a ten is a figure as well: "in the forties" used to count as nothing.
+    ("RSI sits in the twenties and the shares trade in the forties.", 2),
+    ("Thirties, fifties, sixties, seventies, eighties and nineties.", 6),
     # Words that only look like numbers are not counted.
     ("Liquidity, equity and volatility often tend to heighten on a tense day.", 0),
     ("No one won; someone often attends.", 0),
+    ("The parties tie their hopes to the fortieth session, and loyalties shift.", 0),
 ]
 
 

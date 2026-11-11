@@ -2,6 +2,10 @@
 
 No test uses the network. The script's one HTTP function is replaced by a fake, and a
 guard fails any test in which a real connection is attempted.
+
+No test waits either. The script pauses once before its one new attempt after a rate limit
+(HTTP 429): its clock is replaced by one that only notes the pause, and a second guard fails
+any test in which a real pause of a second or more is attempted.
 """
 import ast
 import http.client
@@ -14,6 +18,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import urllib.response
@@ -32,12 +37,21 @@ CONTRACT_TYPES = [
     "trailingTotalRevenue", "trailingNetIncome", "quarterlyTotalRevenue", "quarterlyNetIncome",
     "quarterlyTotalDebt", "quarterlyStockholdersEquity",
 ]
+# `time` is for get_data.py alone: the one pause before the one new attempt after HTTP 429.
 ALLOWED_IMPORTS = {"sys", "json", "math", "re", "hashlib", "datetime", "html",
-                   "urllib.request", "urllib.parse", "urllib.error"}
+                   "urllib.request", "urllib.parse", "urllib.error", "time"}
 REFUSED_SENTENCE = ("the data source refused this network; this is not a problem with the "
                     "ticker and waiting rarely helps")
-STOP_CODES = {"E_SYMBOL", "E_NOT_FOUND", "E_REFUSED", "E_NO_ROUTE", "E_SERVER", "E_CERT",
-              "E_SHAPE"}
+BUSY_SENTENCE = ("the data source is limiting requests from this network right now; this is "
+                 "not a problem with the ticker, and a new run in a few minutes may work")
+NOT_FOUND_SENTENCE = "the data source has no data for this symbol; check the spelling"
+DOT_SENTENCE = ("; a US share class is written with a hyphen there, not a dot (BRK-B, not "
+                "BRK.B); for another exchange, check the letters after the dot")
+STOP_CODES = {"E_SYMBOL", "E_NOT_FOUND", "E_REFUSED", "E_BUSY", "E_NO_ROUTE", "E_SERVER",
+              "E_CERT", "E_SHAPE"}
+# Seconds the script waits before its one new attempt after a rate limit.
+WAIT = 7
+CHART_URL = HOST + "/v8/finance/chart/NVDA?range=1y&interval=1d&events=div%2Csplit"
 SYMBOL_SENTENCE = ("a symbol is 1 to 15 letters, digits, dots, hyphens, carets or equals signs, "
                    "with a letter or a digit among them")
 SERVER_SENTENCE = ("the data source answered with an error of its own; this is not a problem "
@@ -72,14 +86,49 @@ def no_network(monkeypatch):
     assert not attempts, "a test tried to open a network connection"
 
 
+@pytest.fixture(autouse=True)
+def no_waiting(monkeypatch):
+    attempts, real = [], time.sleep
+
+    def nap(seconds):
+        if seconds >= 1:
+            attempts.append(seconds)  # noted and skipped: the test fails below
+        else:
+            real(seconds)  # subprocess polls a child in steps of a few milliseconds
+
+    monkeypatch.setattr(time, "sleep", nap)
+    yield
+    assert not attempts, "a test really tried to wait: %r seconds" % attempts
+
+
+class Clock:
+    """Stands in for the time module inside get_data.py: it notes each pause and waits for
+    none."""
+
+    def __init__(self):
+        self.waits = []
+
+    def sleep(self, seconds):
+        self.waits.append(seconds)
+
+
 @pytest.fixture
 def gd():
-    return load("get_data_under_test", SCRIPT)
+    mod = load("get_data_under_test", SCRIPT)
+    assert mod.time is time
+    mod.time = Clock()
+    return mod
+
+
+def asked(calls):
+    """Which of the three requests each URL is, in the order asked."""
+    return [key for url in calls for key, mark in ys.FakeYahoo.MARKS if mark in url]
 
 
 class Result:
-    def __init__(self, code, out, err, fake, path):
+    def __init__(self, code, out, err, fake, path, waits=()):
         self.code, self.out, self.err, self.fake, self.path = code, out, err, fake, path
+        self.waits = list(waits)
 
     @property
     def bundle(self):
@@ -93,9 +142,15 @@ def run(gd, tmp_path, capsys):
         fake = fake if fake is not None else ys.FakeYahoo(symbol=symbol.upper())
         gd.http_get = fake
         path = Path(out) if out is not None else tmp_path / "bundle.json"
+        before = len(gd.time.waits)
         code = gd.main([symbol, str(path)])
         cap = capsys.readouterr()
-        return Result(code, cap.out, cap.err, fake, path)
+        waits = gd.time.waits[before:]
+        # In every run of every test: a URL is asked a second time only after a pause of
+        # WAIT seconds, each pause is followed by one such request, and none is asked thrice.
+        assert waits == [WAIT] * (len(fake.calls) - len(set(fake.calls))), (waits, fake.calls)
+        assert all(fake.calls.count(url) <= 2 for url in fake.calls), fake.calls
+        return Result(code, cap.out, cap.err, fake, path, waits)
     return go
 
 
@@ -139,15 +194,30 @@ def test_imports_are_on_the_allowlist():
         elif isinstance(node, ast.ImportFrom):
             found.add(node.module)
     assert found <= ALLOWED_IMPORTS
-    assert {"urllib.request", "urllib.parse", "urllib.error"} <= found
+    assert {"urllib.request", "urllib.parse", "urllib.error", "time"} <= found
 
 
 def test_no_forbidden_names_no_clock_no_environment():
     names = {n.id for n in ast.walk(tree()) if isinstance(n, ast.Name)}
     attrs = {n.attr for n in ast.walk(tree()) if isinstance(n, ast.Attribute)}
     assert not names & {"eval", "exec", "compile", "__import__", "os", "subprocess", "socket",
-                        "time", "input"}
-    assert not attrs & {"environ", "getenv", "system", "popen", "now", "utcnow", "today"}
+                        "input"}
+    assert not attrs & {"environ", "getenv", "system", "popen", "now", "utcnow", "today",
+                        "time", "monotonic", "perf_counter", "localtime", "gmtime", "ctime"}
+
+
+def test_time_is_there_for_the_one_pause_and_is_never_read_as_a_clock(gd):
+    # "Now" is the source's clock. The time module is imported for one call: the pause
+    # before the one new attempt after a rate limit.
+    nodes = list(ast.walk(tree()))
+    assert len([n for n in nodes if isinstance(n, ast.Name) and n.id == "time"]) == 1
+    taken = [ast.unparse(n) for n in nodes
+             if isinstance(n, ast.Attribute) and ast.unparse(n.value) == "time"]
+    assert taken == ["time.sleep"]
+    calls = [ast.unparse(n) for n in nodes
+             if isinstance(n, ast.Call) and ast.unparse(n.func) == "time.sleep"]
+    assert calls == ["time.sleep(WAIT)"]
+    assert gd.WAIT == WAIT and type(gd.WAIT) is int
 
 
 def test_the_only_file_opened_is_the_output_path():
@@ -234,10 +304,20 @@ def load(name, path):
 gd = load("get_data", sys.argv[1])
 ys = load("yahoo_shapes", sys.argv[2])
 chart = ys.ok(ys.chart_answer(longName="Nestl\u00e9"))
+if sys.argv[3] == "fund":
+    chart = ys.ok(ys.chart_answer(kind="ETF", longName="Nestl\u00e9"))
 if sys.argv[3] == "refused":
+    chart = ys.refused(403)
+if sys.argv[3] == "busy":
     chart = ys.refused(429)
+class Clock:
+    waits = []
+    def sleep(self, seconds):
+        self.waits.append(seconds)
+gd.time = Clock()  # the pause is noted, not waited
 gd.http_get = ys.FakeYahoo(chart=chart, search=ys.ok(ys.search_answer(odd_title=True)))
-sys.exit(gd.main(sys.argv[4:]))
+code = gd.main(sys.argv[4:])
+sys.exit(code if Clock.waits == ([7] if sys.argv[3] == "busy" else []) else 99)
 """
 
 
@@ -261,13 +341,30 @@ def test_whole_run_in_a_process_with_the_fake_transport(tmp_path):
     assert json.loads(data.decode("ascii"))["chart"]["meta"]["longName"] == "Nestl\u00e9"
 
 
-def test_refusal_in_a_process_with_the_fake_transport(tmp_path):
+def test_whole_run_for_a_fund_in_a_process_with_the_fake_transport(tmp_path):
+    # The fake's statement route holds figures; a fund is not asked for any.
     out = tmp_path / "bundle.json"
-    p = fake_process("refused", out)
+    p = fake_process("fund", out)
+    assert p.stderr == b"" and p.returncode == 0
+    assert p.stdout.decode("ascii").splitlines() == [
+        "DATA ok NVDA bars=251 headlines=4 statements=absent"]
+    bundle = json.loads(out.read_bytes().decode("ascii"))
+    assert bundle["chart"]["meta"]["instrumentType"] == "ETF"
+    assert bundle["errors"] == {"news": None, "statements": None}
+    assert bundle["statements"] == {t: [] for t in CONTRACT_TYPES}
+
+
+@pytest.mark.parametrize("mode, line", [
+    ("refused", "STOP E_REFUSED " + REFUSED_SENTENCE + " (HTTP 403)"),
+    ("busy", "STOP E_BUSY " + BUSY_SENTENCE + " (HTTP 429)")])
+def test_refusal_in_a_process_with_the_fake_transport(tmp_path, mode, line):
+    out = tmp_path / "bundle.json"
+    p = fake_process(mode, out)
+    # 2 is the stop; the runner answers 99 if the script paused when it should not have,
+    # or did not ask for its one pause of 7 seconds after the rate limit.
     assert p.returncode == 2
     assert p.stdout == b""
-    err = p.stderr.decode("ascii").replace("\r\n", "\n")
-    assert one_line(err, "STOP E_REFUSED") == REFUSED_SENTENCE
+    assert p.stderr.decode("ascii").replace("\r\n", "\n") == line + "\n"
     assert out.read_bytes() == b""
 
 
@@ -352,7 +449,7 @@ def test_three_requests_to_one_host_with_the_exact_urls(run):
     r = run("NVDA")
     assert r.code == 0
     assert r.fake.calls == [
-        HOST + "/v8/finance/chart/NVDA?range=1y&interval=1d&events=div%2Csplit",
+        CHART_URL,
         HOST + "/v1/finance/search?q=NVDA&newsCount=10&quotesCount=0",
         HOST + "/ws/fundamentals-timeseries/v1/finance/timeseries/NVDA?symbol=NVDA&type="
         + "%2C".join(CONTRACT_TYPES)
@@ -516,7 +613,8 @@ def drop(*path):
 
 FIRST_REQUEST_STOPS = [
     ("404 unknown symbol", lambda: ys.not_found(), "E_NOT_FOUND"),
-    ("429", lambda: ys.refused(429), "E_REFUSED"),
+    # A rate limit is not a refusal: it is asked once more, and it may clear.
+    ("429", lambda: ys.refused(429), "E_BUSY"),
     ("403", lambda: ys.refused(403), "E_REFUSED"),
     ("999", lambda: ys.refused(999), "E_REFUSED"),
     ("401", lambda: ys.refused(401), "E_REFUSED"),
@@ -593,11 +691,18 @@ FIRST_REQUEST_STOPS = [
 @pytest.mark.parametrize("answer,code", [(a, c) for _, a, c in FIRST_REQUEST_STOPS],
                          ids=[name for name, _, _ in FIRST_REQUEST_STOPS])
 def test_chart_failure_is_a_stop_with_a_fixed_code(run, gd, answer, code):
-    r = run("NVDA", fake=ys.FakeYahoo(chart=answer()))
+    answer = answer()
+    r = run("NVDA", fake=ys.FakeYahoo(chart=answer))
     assert r.code == 2
     assert r.out == ""
-    assert one_line(r.err, "STOP " + code) == gd.STOPS[code]
-    assert len(r.fake.calls) == 1, "no retry and no further request after a failed chart"
+    # A stop that came from an HTTP status ends with that status in brackets.
+    status = answer[0] if isinstance(answer, tuple) and answer[0] != 200 else None
+    assert one_line(r.err, "STOP " + code) == gd.STOPS[code] + (
+        " (HTTP %d)" % status if status else "")
+    assert ("(HTTP" in r.err) == (status is not None)
+    # One new attempt after a rate limit and none after anything else; no further request.
+    assert r.fake.calls == [CHART_URL] * (2 if status == 429 else 1)
+    assert r.waits == ([WAIT] if status == 429 else [])
     assert r.path.read_bytes() == b""
 
 
@@ -605,8 +710,44 @@ def test_every_stop_code_of_the_contract_is_reachable():
     assert {code for _, _, code in FIRST_REQUEST_STOPS} | {"E_SYMBOL"} == STOP_CODES
 
 
+HTTP_STOPS = [
+    (401, "STOP E_REFUSED " + REFUSED_SENTENCE + " (HTTP 401)"),
+    (403, "STOP E_REFUSED " + REFUSED_SENTENCE + " (HTTP 403)"),
+    (999, "STOP E_REFUSED " + REFUSED_SENTENCE + " (HTTP 999)"),
+    (429, "STOP E_BUSY " + BUSY_SENTENCE + " (HTTP 429)"),
+    (404, "STOP E_NOT_FOUND " + NOT_FOUND_SENTENCE + " (HTTP 404)"),
+    (500, "STOP E_SERVER " + SERVER_SENTENCE + " (HTTP 500)"),
+    (503, "STOP E_SERVER " + SERVER_SENTENCE + " (HTTP 503)"),
+    (302, "STOP E_SHAPE the data source sent an answer this script does not understand; its "
+          "format may have changed (HTTP 302)"),
+]
+
+
+@pytest.mark.parametrize("status,line", HTTP_STOPS)
+def test_a_stop_from_an_http_status_ends_with_the_status_in_brackets(run, status, line):
+    r = run("NVDA", fake=ys.FakeYahoo(chart=ys.refused(status)))
+    assert (r.code, r.out, r.err) == (2, "", line + "\n")
+
+
+@pytest.mark.parametrize("fake", [
+    lambda: ys.FakeYahoo(chart=socket.timeout("timed out")),
+    lambda: ys.FakeYahoo(chart=urllib.error.URLError(cert_error())),
+    lambda: ys.FakeYahoo(chart=(200, {"date": ys.DATE}, b"<html>HTTP 403</html>")),
+    lambda: ys.FakeYahoo(chart=raw({"chart": {"result": [], "error": "HTTP 429"}})),
+], ids=["no route", "certificate", "a page that names a status", "an answer that names one"])
+def test_a_stop_that_did_not_come_from_an_http_status_names_none(run, gd, fake):
+    r = run("NVDA", fake=fake())
+    assert r.code == 2 and "HTTP" not in r.err
+    assert r.err.rstrip("\n").split(" ", 2)[2] in gd.STOPS.values()
+    r = run("NV DA")
+    assert r.err == "STOP E_SYMBOL " + SYMBOL_SENTENCE + "\n"
+
+
 def test_fixed_sentences(gd):
     assert gd.STOPS["E_REFUSED"] == REFUSED_SENTENCE
+    assert gd.STOPS["E_BUSY"] == BUSY_SENTENCE
+    assert gd.STOPS["E_NOT_FOUND"] == NOT_FOUND_SENTENCE
+    assert gd.DOT == DOT_SENTENCE
     assert gd.STOPS["E_SYMBOL"] == SYMBOL_SENTENCE
     assert gd.STOPS["E_SERVER"] == SERVER_SENTENCE
     assert gd.ERRORS["E_WRITE"] == "could not write the output file or print the result"
@@ -623,10 +764,313 @@ def test_not_found_suggests_a_hyphen_only_when_the_symbol_has_a_dot(run, gd, sym
     r = run(symbol, fake=ys.FakeYahoo(chart=ys.not_found()))
     assert r.code == 2
     sentence = one_line(r.err, "STOP E_NOT_FOUND")
-    # Two fixed sentences; neither echoes what was typed.
-    assert sentence == gd.STOPS["E_NOT_FOUND"] + (gd.DOT if hint else "")
+    # Two fixed sentences and the status; none of them echoes what was typed.
+    assert sentence == NOT_FOUND_SENTENCE + (DOT_SENTENCE if hint else "") + " (HTTP 404)"
     assert ("hyphen" in sentence) is hint
     assert symbol not in sentence
+
+
+def test_the_hint_for_a_dot_covers_a_share_class_and_another_exchange(run):
+    # "SHEL.L" is right as it stands: the hint must not tell every dot to become a hyphen.
+    r = run("BRK.B", fake=ys.FakeYahoo(chart=ys.not_found()))
+    assert r.err == (
+        "STOP E_NOT_FOUND the data source has no data for this symbol; check the spelling; a US "
+        "share class is written with a hyphen there, not a dot (BRK-B, not BRK.B); for another "
+        "exchange, check the letters after the dot (HTTP 404)\n")
+    # The hint belongs to "not found" alone.
+    for status in (403, 429, 500):
+        r = run("SHEL.L", fake=ys.FakeYahoo(symbol="SHEL.L", chart=ys.refused(status)))
+        assert r.code == 2 and "hyphen" not in r.err and "exchange" not in r.err
+
+
+# --- a rate limit: one pause, then one new attempt -------------------------------------------
+
+
+def test_a_rate_limit_that_persists_is_a_stop_after_two_requests(run):
+    chart = ys.in_turn(ys.refused(429), ys.refused(429), ys.ok(ys.chart_answer()))
+    r = run("NVDA", fake=ys.FakeYahoo(chart=chart))
+    assert (r.code, r.out) == (2, "")
+    assert r.err == "STOP E_BUSY " + BUSY_SENTENCE + " (HTTP 429)\n"
+    assert r.fake.calls == [CHART_URL, CHART_URL]
+    assert len(chart.left) == 1, "a third attempt was made"
+    assert r.waits == [7]
+    assert r.path.read_bytes() == b""
+
+
+def test_a_rate_limit_that_clears_costs_one_more_request_and_the_run_succeeds(run):
+    plain = run("NVDA").bundle
+    limited = ys.refused(429, date=ys.http_date(ys.FETCHED - 7))
+    chart = ys.in_turn(limited, ys.ok(ys.chart_answer()))
+    r = run("NVDA", fake=ys.FakeYahoo(chart=chart))
+    assert r.code == 0 and r.err == ""
+    assert r.out == "DATA ok NVDA bars=251 headlines=3 statements=ok\n"
+    assert r.fake.calls[:2] == [CHART_URL, CHART_URL]
+    assert asked(r.fake.calls) == ["chart", "chart", "search", "timeseries"]
+    assert r.waits == [7] and chart.left == []
+    # Nothing of the first answer is kept, its clock included: the bundle is the one of an
+    # untroubled run.
+    assert r.bundle == plain and r.bundle["fetched_at"] == ys.FETCHED
+
+
+@pytest.mark.parametrize("value", ["1", "120", "0", "Wed, 11 Nov 2026 17:00:00 GMT"])
+def test_the_pause_is_seven_seconds_whatever_a_retry_after_header_says(run, value):
+    # A standing decision: the header is not read. The one pause is the fixed one, and the
+    # one new attempt follows it whether the source asked for a second or for two minutes.
+    for key in ("Retry-After", "retry-after"):
+        status, headers, body = ys.refused(429)
+        limited = status, dict(headers, **{key: value}), body
+        chart = ys.in_turn(limited, limited, ys.ok(ys.chart_answer()))
+        r = run("NVDA", fake=ys.FakeYahoo(chart=chart))
+        assert (r.code, r.out) == (2, "") and r.waits == [7]
+        assert r.err == "STOP E_BUSY " + BUSY_SENTENCE + " (HTTP 429)\n"
+        assert r.fake.calls == [CHART_URL, CHART_URL] and len(chart.left) == 1
+        chart = ys.in_turn(limited, ys.ok(ys.chart_answer()))
+        r = run("NVDA", fake=ys.FakeYahoo(chart=chart))
+        assert r.code == 0 and r.waits == [7] and r.bundle["fetched_at"] == ys.FETCHED
+    assert "retry" not in SCRIPT.read_text(encoding="ascii").lower()
+
+
+def test_a_refusal_is_asked_once_and_never_waited_for(run):
+    for status in (401, 403, 999):
+        chart = ys.in_turn(ys.refused(status), ys.ok(ys.chart_answer()))
+        r = run("NVDA", fake=ys.FakeYahoo(chart=chart))
+        assert (r.code, r.out) == (2, "")
+        assert r.err == "STOP E_REFUSED " + REFUSED_SENTENCE + " (HTTP %d)\n" % status
+        assert r.fake.calls == [CHART_URL] and r.waits == []
+        assert len(chart.left) == 1, "the answer that would have followed was asked for"
+
+
+@pytest.mark.parametrize("first", [
+    lambda: ys.not_found(), lambda: ys.refused(400), lambda: ys.refused(500),
+    lambda: ys.refused(503), lambda: (302, {"Location": "https://elsewhere.test/"}, b""),
+    lambda: socket.timeout("timed out"), lambda: urllib.error.URLError(cert_error()),
+    lambda: (200, {"date": ys.DATE}, b"Too Many Requests"),
+    lambda: raw({"chart": {"result": None, "error": {"code": "Too Many Requests"}}}),
+], ids=["404", "400", "500", "503", "302", "timeout", "certificate", "a 200 page", "a 200 error"])
+def test_nothing_but_status_429_earns_a_new_attempt(run, first):
+    chart = ys.in_turn(first(), ys.ok(ys.chart_answer()))
+    r = run("NVDA", fake=ys.FakeYahoo(chart=chart))
+    assert r.code == 2 and r.fake.calls == [CHART_URL] and r.waits == []
+    assert len(chart.left) == 1
+
+
+def test_the_pause_comes_between_the_two_requests(gd, tmp_path):
+    events = []
+    fake = ys.FakeYahoo(chart=ys.in_turn(ys.refused(429), ys.ok(ys.chart_answer())))
+
+    def http_get(url):
+        events.append("ask " + asked([url])[0])
+        return fake(url)
+
+    class Noting:
+        def sleep(self, seconds):
+            events.append("wait %r" % (seconds,))
+
+    gd.http_get, gd.time = http_get, Noting()
+    assert gd.main(["NVDA", str(tmp_path / "bundle.json")]) == 0
+    assert events == ["ask chart", "wait 7", "ask chart", "ask search", "ask timeseries"]
+
+
+SECOND_ANSWERS = [
+    ("refused", lambda: ys.refused(403), "E_REFUSED " + REFUSED_SENTENCE + " (HTTP 403)"),
+    ("not found", lambda: ys.not_found(), "E_NOT_FOUND " + NOT_FOUND_SENTENCE + " (HTTP 404)"),
+    ("server error", lambda: ys.refused(502), "E_SERVER " + SERVER_SENTENCE + " (HTTP 502)"),
+    ("no route", lambda: socket.timeout("timed out"),
+     "E_NO_ROUTE could not reach the data source: no connection, or no answer in 10 seconds"),
+    ("certificate", lambda: urllib.error.URLError(cert_error()),
+     "E_CERT the secure connection to the data source was not trusted (certificate check)"),
+    ("a page", lambda: (200, {"date": ys.DATE}, b"<html></html>"),
+     "E_SHAPE the data source sent an answer this script does not understand; its format may "
+     "have changed"),
+]
+
+
+@pytest.mark.parametrize("answer,line", [(a, line) for _, a, line in SECOND_ANSWERS],
+                         ids=[name for name, _, _ in SECOND_ANSWERS])
+def test_the_new_attempt_is_judged_like_any_request(run, answer, line):
+    chart = ys.in_turn(ys.refused(429), answer())
+    r = run("NVDA", fake=ys.FakeYahoo(chart=chart))
+    assert (r.code, r.out, r.err) == (2, "", "STOP " + line + "\n")
+    assert r.fake.calls == [CHART_URL, CHART_URL] and r.waits == [7]
+    assert r.path.read_bytes() == b""
+
+
+def test_each_of_the_three_requests_has_its_own_new_attempt(run):
+    plain = run("NVDA").bundle
+    fake = ys.FakeYahoo(chart=ys.in_turn(ys.refused(429), ys.ok(ys.chart_answer())),
+                        search=ys.in_turn(ys.refused(429), ys.ok(ys.search_answer())),
+                        timeseries=ys.in_turn(ys.refused(429), ys.ok(ys.timeseries_answer())))
+    r = run("NVDA", fake=fake)
+    assert r.code == 0 and r.err == ""
+    assert r.out == "DATA ok NVDA bars=251 headlines=3 statements=ok\n"
+    assert asked(r.fake.calls) == ["chart", "chart", "search", "search", "timeseries",
+                                   "timeseries"]
+    assert r.fake.calls[2] == r.fake.calls[3] and r.fake.calls[4] == r.fake.calls[5]
+    assert r.waits == [7, 7, 7]
+    assert r.bundle == plain and r.bundle["errors"] == {"news": None, "statements": None}
+
+
+def test_a_follow_up_request_that_stays_limited_is_recorded_after_two_requests(run):
+    # As recorded on a limited network: the bars arrived, and both follow-up requests met
+    # status 429 on the first attempt and on the new one.
+    search = ys.in_turn(ys.refused(429), ys.refused(429), ys.ok(ys.search_answer()))
+    series = ys.in_turn(ys.refused(429), ys.refused(429), ys.ok(ys.timeseries_answer()))
+    r = run("NVDA", fake=ys.FakeYahoo(search=search, timeseries=series))
+    assert r.code == 0 and r.err == ""
+    assert r.out == "DATA ok NVDA bars=251 headlines=failed statements=failed\n"
+    assert r.bundle["errors"] == {"news": "HTTP 429", "statements": "HTTP 429"}
+    assert r.bundle["news"] == [] and r.bundle["statements"] == {t: [] for t in CONTRACT_TYPES}
+    assert asked(r.fake.calls) == ["chart", "search", "search", "timeseries", "timeseries"]
+    assert len(search.left) == len(series.left) == 1 and r.waits == [7, 7]
+    assert len(r.bundle["chart"]["close"]) == 251
+
+
+def test_a_follow_up_request_whose_limit_clears_is_not_recorded_as_failed(run):
+    search = ys.in_turn(ys.refused(429), ys.ok(ys.search_answer()))
+    r = run("NVDA", fake=ys.FakeYahoo(search=search, timeseries=ys.refused(429)))
+    assert r.out == "DATA ok NVDA bars=251 headlines=3 statements=failed\n"
+    assert r.bundle["errors"] == {"news": None, "statements": "HTTP 429"}
+    assert len(r.bundle["news"]) == 3 and r.waits == [7, 7]
+
+
+def test_the_new_attempt_through_urllib_is_the_same_plain_request(gd, tmp_path, capsys):
+    fake = ys.FakeYahoo(chart=ys.in_turn(ys.refused(429), ys.ok(ys.chart_answer())))
+    gd.OPENER, seen = canned_opener(gd, fake)
+    out = tmp_path / "bundle.json"
+    assert gd.main(["NVDA", str(out)]) == 0
+    assert capsys.readouterr().out == "DATA ok NVDA bars=251 headlines=3 statements=ok\n"
+    assert len(seen) == 4 and [r.full_url for r in seen] == fake.calls
+    assert seen[0].full_url == seen[1].full_url == CHART_URL
+    for req in seen:
+        assert req.get_method() == "GET" and req.data is None and req.timeout == 10
+        assert dict(req.header_items()) == {"User-agent": UA, "Host": "query1.finance.yahoo.com"}
+    assert gd.time.waits == [7]
+
+
+# --- request 3 is sent for a company only ----------------------------------------------------
+
+# Only a company has statements. The chart answer names the type; for any type but a share
+# the statement request is not sent, where it used to be sent and answered with nothing (or,
+# on a limited network, refused: "statements=failed" for a coin that has none).
+NOT_A_COMPANY = ["ETF", "INDEX", "CRYPTOCURRENCY", "MUTUALFUND", "FUTURE", "CURRENCY",
+                 "SOMETHING_NEW", "equity", "Equity", ""]
+EMPTY_STATEMENTS = {t: [] for t in CONTRACT_TYPES}
+SEARCH_URL = HOST + "/v1/finance/search?q=NVDA&newsCount=10&quotesCount=0"
+
+
+def typed(kind):
+    """A chart answer whose meta names this instrument type, with the row shape of that
+    type where the fake knows one (a coin has a bar on every day and no dividends)."""
+    if kind == "CRYPTOCURRENCY":
+        return ys.chart_answer(kind=kind)
+    answer = ys.chart_answer()
+    answer["chart"]["result"][0]["meta"]["instrumentType"] = kind
+    return answer
+
+
+@pytest.mark.parametrize("kind", ["EQUITY", "absent", None], ids=repr)
+def test_a_share_or_a_meta_that_names_no_type_is_asked_for_statements(run, kind):
+    answer = typed(kind)
+    meta = answer["chart"]["result"][0]["meta"]
+    if kind == "absent":
+        del meta["instrumentType"]
+    assert meta.get("instrumentType") in ("EQUITY", None)
+    r = run("NVDA", fake=ys.FakeYahoo(chart=ys.ok(answer)))
+    assert r.code == 0 and r.err == ""
+    assert r.out == "DATA ok NVDA bars=251 headlines=3 statements=ok\n"
+    assert asked(r.fake.calls) == ["chart", "search", "timeseries"]
+    assert r.bundle["errors"] == {"news": None, "statements": None}
+    assert len(r.bundle["statements"]["quarterlyTotalRevenue"]) == 5
+    assert ("instrumentType" in r.bundle["chart"]["meta"]) == (kind != "absent")
+
+
+@pytest.mark.parametrize("kind", NOT_A_COMPANY, ids=repr)
+def test_any_other_type_gets_two_requests_and_no_statement_request(run, kind):
+    # The statement route of the fake holds figures: none reach the bundle because none
+    # were asked for.
+    fake = ys.FakeYahoo(chart=ys.ok(typed(kind)))
+    r = run("NVDA", fake=fake)
+    assert r.code == 0 and r.err == ""
+    assert r.fake.calls == [CHART_URL, SEARCH_URL] and r.waits == []
+    assert r.out == "DATA ok NVDA bars=251 headlines=3 statements=absent\n"
+    b = r.bundle
+    assert b["statements"] == EMPTY_STATEMENTS and list(b["statements"]) == CONTRACT_TYPES
+    assert b["errors"] == {"news": None, "statements": None}
+    assert b["chart"]["meta"]["instrumentType"] == kind
+    # The rest of the bundle is what a share's is.
+    assert list(b) == ["schema", "symbol", "source", "fetched_at", "chart", "news", "statements",
+                       "errors"]
+    assert b["fetched_at"] == ys.FETCHED and len(b["news"]) == 3
+    assert len(b["chart"]["close"]) == 251
+
+
+@pytest.mark.parametrize("series", [
+    lambda: ys.refused(429), lambda: ys.refused(403), lambda: socket.timeout("timed out"),
+    lambda: raw(None), lambda: ys.in_turn()], ids=["429", "403", "timeout", "null", "nothing"])
+def test_a_request_that_is_not_sent_cannot_fail_or_wait(run, series):
+    # On a limited network the statement request of a coin used to meet HTTP 429, wait
+    # seven seconds, meet it again and be written down as failed.
+    for kind in ("ETF", "INDEX", "CRYPTOCURRENCY", "MUTUALFUND"):
+        r = run("NVDA", fake=ys.FakeYahoo(chart=ys.ok(typed(kind)), timeseries=series()))
+        assert r.code == 0 and r.err == "" and r.waits == []
+        assert asked(r.fake.calls) == ["chart", "search"]
+        assert r.out == "DATA ok NVDA bars=251 headlines=3 statements=absent\n"
+        assert r.bundle["errors"] == {"news": None, "statements": None}
+    # The same route for a share is asked, and its failure is recorded.
+    r = run("NVDA", fake=ys.FakeYahoo(timeseries=series()))
+    assert r.out == "DATA ok NVDA bars=251 headlines=3 statements=failed\n"
+    assert r.bundle["errors"]["statements"] and "timeseries" in asked(r.fake.calls)
+
+
+def test_the_headline_request_of_a_fund_is_sent_and_judged_as_before(run):
+    r = run("NVDA", fake=ys.FakeYahoo(chart=ys.ok(typed("ETF")), search=ys.refused(429)))
+    assert r.code == 0 and r.err == ""
+    assert r.out == "DATA ok NVDA bars=251 headlines=failed statements=absent\n"
+    assert r.bundle["errors"] == {"news": "HTTP 429", "statements": None}
+    assert asked(r.fake.calls) == ["chart", "search", "search"] and r.waits == [WAIT]
+    r = run("NVDA", fake=ys.FakeYahoo(chart=ys.ok(typed("INDEX")),
+                                      search=ys.ok(ys.search_answer(own=0, other=3))))
+    assert r.out == "DATA ok NVDA bars=251 headlines=0 statements=absent\n"
+    assert r.bundle["errors"] == {"news": None, "statements": None}
+    # A chart request that met a rate limit first is asked again, then the one follow-up.
+    chart = ys.in_turn(ys.refused(429), ys.ok(typed("MUTUALFUND")))
+    r = run("NVDA", fake=ys.FakeYahoo(chart=chart))
+    assert asked(r.fake.calls) == ["chart", "chart", "search"] and r.waits == [WAIT]
+    assert r.out == "DATA ok NVDA bars=251 headlines=3 statements=absent\n"
+
+
+@pytest.mark.parametrize("symbol", ["^GSPC", "BTC-USD", "SPY", "EURUSD=X"])
+def test_the_type_in_the_answer_decides_not_the_look_of_the_symbol(run, symbol):
+    # A symbol that looks like an index or a coin and is answered as a share is asked for
+    # statements; a plain symbol answered as a fund is not.
+    r = run(symbol, fake=ys.FakeYahoo(symbol=symbol))
+    assert asked(r.fake.calls) == ["chart", "search", "timeseries"]
+    assert r.out == "DATA ok %s bars=251 headlines=3 statements=ok\n" % symbol
+    r = run(symbol, fake=ys.FakeYahoo(symbol=symbol, chart=ys.ok(typed("ETF"))))
+    assert asked(r.fake.calls) == ["chart", "search"]
+    assert r.out == "DATA ok %s bars=251 headlines=3 statements=absent\n" % symbol
+
+
+@pytest.mark.parametrize("kind", [7, 0, True, False, ["EQUITY"], {"EQUITY": 1}, 1.5], ids=repr)
+def test_a_type_that_is_not_text_never_breaks_the_run(run, kind):
+    # Only an absent type, a null and the word EQUITY ask for statements.
+    r = run("NVDA", fake=ys.FakeYahoo(chart=ys.ok(typed(kind))))
+    assert r.code == 0 and r.err == ""
+    assert asked(r.fake.calls) == ["chart", "search"]
+    assert r.out == "DATA ok NVDA bars=251 headlines=3 statements=absent\n"
+    assert r.bundle["chart"]["meta"]["instrumentType"] == kind
+
+
+def test_a_fund_through_urllib_sends_two_plain_requests(gd, tmp_path, capsys):
+    fake = ys.FakeYahoo(chart=ys.ok(typed("ETF")))
+    gd.OPENER, seen = canned_opener(gd, fake)
+    out = tmp_path / "bundle.json"
+    assert gd.main(["NVDA", str(out)]) == 0
+    assert capsys.readouterr().out == "DATA ok NVDA bars=251 headlines=3 statements=absent\n"
+    assert [r.full_url for r in seen] == fake.calls == [CHART_URL, SEARCH_URL]
+    for req in seen:
+        assert req.get_method() == "GET" and req.data is None and req.timeout == 10
+        assert dict(req.header_items()) == {"User-agent": UA, "Host": "query1.finance.yahoo.com"}
 
 
 # --- requests 2 and 3 failing are recorded ---------------------------------------------------
@@ -655,10 +1099,14 @@ SIDE_PARAMS = dict(argvalues=[(a, label) for _, a, label in SIDE_FAILURES],
 def test_headline_request_failing_is_recorded_and_the_run_continues(run, answer, label):
     r = run("NVDA", fake=ys.FakeYahoo(search=answer()))
     assert r.code == 0 and r.err == ""
-    assert r.out == "DATA ok NVDA bars=251 headlines=0 statements=ok\n"
+    # "failed", not 0: the request failed, which is not the same as no headline existing.
+    assert r.out == "DATA ok NVDA bars=251 headlines=failed statements=ok\n"
     assert r.bundle["news"] == []
     assert r.bundle["errors"] == {"news": label, "statements": None}
-    assert len(r.fake.calls) == 3
+    # Asked once, or twice after a rate limit; the statement request follows either way.
+    again = label == "HTTP 429"
+    assert asked(r.fake.calls) == ["chart"] + ["search"] * (1 + again) + ["timeseries"]
+    assert r.waits == [WAIT] * again
     assert len(r.bundle["statements"]["quarterlyTotalRevenue"]) == 5
 
 
@@ -666,19 +1114,41 @@ def test_headline_request_failing_is_recorded_and_the_run_continues(run, answer,
 def test_statement_request_failing_is_recorded_and_the_run_continues(run, answer, label):
     r = run("NVDA", fake=ys.FakeYahoo(timeseries=answer()))
     assert r.code == 0 and r.err == ""
-    assert r.out == "DATA ok NVDA bars=251 headlines=3 statements=absent\n"
+    # "failed", not "absent": that word is for a source that answered and had no figure.
+    assert r.out == "DATA ok NVDA bars=251 headlines=3 statements=failed\n"
     assert r.bundle["statements"] == {t: [] for t in CONTRACT_TYPES}
     assert r.bundle["errors"] == {"news": None, "statements": label}
-    assert len(r.fake.calls) == 3
+    again = label == "HTTP 429"
+    assert asked(r.fake.calls) == ["chart", "search"] + ["timeseries"] * (1 + again)
+    assert r.waits == [WAIT] * again
     assert len(r.bundle["news"]) == 3
 
 
 def test_both_side_requests_failing_still_writes_the_bars(run):
     r = run("NVDA", fake=ys.FakeYahoo(search=ys.refused(429), timeseries=ys.not_found()))
     assert r.code == 0 and r.err == ""
-    assert r.out == "DATA ok NVDA bars=251 headlines=0 statements=absent\n"
+    assert r.out == "DATA ok NVDA bars=251 headlines=failed statements=failed\n"
     assert r.bundle["errors"] == {"news": "HTTP 429", "statements": "HTTP 404"}
+    assert asked(r.fake.calls) == ["chart", "search", "search", "timeseries"]
     assert len(r.bundle["chart"]["close"]) == 251
+
+
+def test_the_result_line_tells_a_failed_request_from_an_empty_answer(run):
+    # Both follow-up requests answered, and the source had nothing: a count and "absent".
+    empty = dict(search=ys.ok(ys.search_answer(own=0, other=3)),
+                 timeseries=ys.ok(ys.timeseries_answer(empty=CONTRACT_TYPES)))
+    r = run("NVDA", fake=ys.FakeYahoo(**empty))
+    assert r.out == "DATA ok NVDA bars=251 headlines=0 statements=absent\n"
+    assert r.bundle["errors"] == {"news": None, "statements": None}
+    # Neither answered: the bundle holds the same empty lists, and the line says "failed".
+    r2 = run("NVDA", fake=ys.FakeYahoo(search=ys.refused(403), timeseries=ys.refused(503)))
+    assert r2.out == "DATA ok NVDA bars=251 headlines=failed statements=failed\n"
+    assert (r2.bundle["news"], r2.bundle["statements"]) == (r.bundle["news"],
+                                                            r.bundle["statements"])
+    assert r2.bundle["errors"] == {"news": "HTTP 403", "statements": "HTTP 503"}
+    for line in (r.out, r2.out):
+        assert re.fullmatch(r"DATA ok \S+ bars=\d+ headlines=(\d+|failed) "
+                            r"statements=(ok|absent|failed)\n", line)
 
 
 ODD_SIDE_BODIES = [
@@ -696,6 +1166,7 @@ ODD_SIDE_BODIES = [
 def test_odd_side_answers_never_break_the_run(run, body):
     r = run("NVDA", fake=ys.FakeYahoo(search=raw(body), timeseries=raw(body)))
     assert r.code == 0 and r.err == ""
+    assert r.out == "DATA ok NVDA bars=251 headlines=failed statements=failed\n"
     assert r.bundle["errors"] == {"news": "unexpected answer", "statements": "unexpected answer"}
     assert r.bundle["news"] == [] and not any(r.bundle["statements"].values())
 
@@ -752,6 +1223,8 @@ def test_null_row_in_the_middle_is_kept_and_counted(run):
         symbol="BTC-USD", chart=ys.ok(answer), search=ys.ok(ys.search_answer(own=0, other=0)),
         timeseries=ys.ok(ys.timeseries_answer("BTC-USD", empty=CONTRACT_TYPES))))
     assert r.code == 0
+    # A coin is not asked for statements: two requests, and "absent" without asking.
+    assert asked(r.fake.calls) == ["chart", "search"]
     assert r.out == "DATA ok BTC-USD bars=366 headlines=0 statements=absent\n"
     chart = r.bundle["chart"]
     for key in ("open", "high", "low", "close", "volume"):
@@ -880,8 +1353,9 @@ def test_titles_are_cut_to_160_characters(run):
 
 def test_titles_are_one_clean_line(run):
     r = run("NVDA", fake=ys.FakeYahoo(search=ys.ok(ys.search_answer(own=0, odd_title=True))))
+    assert "\u201cquoted\u201d" in ys.ODD_TITLE
     assert [n["title"] for n in r.bundle["news"]] == [
-        "Generated \u201cquoted\u201d headline with a caf\u00e9, a - sign, a break"]
+        'Generated "quoted" headline with a caf\u00e9, a - sign, a break']
 
 
 def test_news_items_with_odd_fields(run):
@@ -1032,11 +1506,17 @@ def test_exit_codes_are_the_contracts(run, gd, tmp_path):
     assert gd.main([]) == 4
 
 
-def test_no_request_is_ever_repeated(run):
-    for fake in (ys.FakeYahoo(), ys.FakeYahoo(search=ys.refused(429), timeseries=ys.refused(429)),
-                 ys.FakeYahoo(search=socket.timeout("timed out"))):
+def test_no_request_is_repeated_unless_the_source_was_limiting(run):
+    for fake in (ys.FakeYahoo(), ys.FakeYahoo(search=ys.refused(403), timeseries=ys.refused(500)),
+                 ys.FakeYahoo(search=socket.timeout("timed out")),
+                 ys.FakeYahoo(search=raw(None), timeseries=ys.not_found())):
         r = run("NVDA", fake=fake)
         assert len(r.fake.calls) == 3 and len(set(r.fake.calls)) == 3
+        assert r.waits == []
+    r = run("NVDA", fake=ys.FakeYahoo(search=ys.refused(429), timeseries=ys.refused(429)))
+    assert asked(r.fake.calls) == ["chart", "search", "search", "timeseries", "timeseries"]
+    assert r.fake.calls[1] == r.fake.calls[2] and r.fake.calls[3] == r.fake.calls[4]
+    assert r.waits == [WAIT, WAIT]
 
 
 # --- hostile and awkward values in the side answers ------------------------------------------
@@ -1078,6 +1558,62 @@ def test_control_characters_never_reach_a_title_or_a_publisher(run):
     assert item["title"] == item["publisher"] == "Made up [31mred head line"
     data = r.path.read_bytes()
     assert not re.search(rb"\\u00[01][0-9a-f]|\\u007f", data)
+
+
+# Double quotes of other shapes, and characters that print nothing.
+QUOTES = "\u201c\u201d\u201e\u201f\uff02"
+HIDDEN = ("\u200b\u200c\u200d\u200e\u200f"   # zero width: space, non-joiner, joiner, two marks
+          "\u202a\u202b\u202c\u202d\u202e"   # direction embeddings and overrides, and their end
+          "\u2066\u2067\u2068\u2069"         # direction isolates and their end
+          "\ufeff")                          # the byte-order mark, a zero width space too
+
+
+def code_points(text):
+    return ["U+%04X" % ord(c) for c in text]
+
+
+@pytest.mark.parametrize("quote", QUOTES, ids=code_points(QUOTES))
+def test_a_typographic_double_quote_becomes_the_plain_one(run, gd, quote):
+    title = "Maker says %sno plan%s to sell" % (quote, quote)
+    assert gd.clean(title, 160) == 'Maker says "no plan" to sell'
+    r = run("NVDA", fake=ys.FakeYahoo(search=only_news({"title": title, "publisher": title})))
+    item = r.bundle["news"][0]
+    assert item["title"] == item["publisher"] == 'Maker says "no plan" to sell'
+    assert b'Maker says \\"no plan\\" to sell' in r.path.read_bytes()
+
+
+def test_other_marks_are_left_as_they_are(run, gd):
+    # Apostrophes and single quotes, angle quotes, dashes and the neighbours of the ranges
+    # above: only the double quotes change and only the hidden characters go.
+    kept = ["Maker\u2019s plan", "\u2018single\u2019", "\u201asingle\u201b", "\u00abangle\u00bb",
+            "a \u2013 b \u2014 c \u2020", "caf\u00e9 \uff01 \uff03", "it's 5' 2\" tall", "a\u2010b",
+            "9\u2030", "\u65e5\u672c"]
+    for text in kept:
+        assert gd.clean(text, 160) == text
+    r = run("NVDA", fake=ys.FakeYahoo(search=only_news(*[{"title": text} for text in kept])))
+    assert [n["title"] for n in r.bundle["news"]] == kept
+
+
+@pytest.mark.parametrize("mark", HIDDEN, ids=code_points(HIDDEN))
+def test_a_character_that_prints_nothing_is_dropped(run, gd, mark):
+    title = "%sMade%sup head%s %sline%s" % ((mark,) * 5)
+    assert gd.clean(title, 160) == "Madeup head line"
+    r = run("NVDA", fake=ys.FakeYahoo(search=only_news({"title": title, "publisher": title})))
+    item = r.bundle["news"][0]
+    assert item["title"] == item["publisher"] == "Madeup head line"
+    assert ("\\u%04x" % ord(mark)).encode("ascii") not in r.path.read_bytes().lower()
+
+
+def test_hidden_characters_do_not_count_as_length_and_do_not_make_a_title(run, gd):
+    # The 160 characters are counted after the hidden ones are gone.
+    assert gd.clean("\u200b".join("x" * 200), 160) == "x" * 160
+    assert gd.clean("\u202e" * 300 + "Kept", 160) == "Kept"
+    # A title made of nothing that prints is no title: the item is dropped like a blank one.
+    r = run("NVDA", fake=ys.FakeYahoo(search=only_news(
+        {"title": "\u200b\u202e\ufeff"}, {"title": " \u200d \u2069"},
+        {"title": "\u202eA \u201cKept\u201d one\u202c"})))
+    assert [n["title"] for n in r.bundle["news"]] == ['A "Kept" one']
+    assert r.out == "DATA ok NVDA bars=251 headlines=1 statements=ok\n"
 
 
 def test_markup_and_instructions_in_a_headline_are_stored_as_text_and_never_printed(run):

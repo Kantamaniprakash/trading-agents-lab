@@ -7,12 +7,13 @@ import datetime
 import json
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 VERSION = "2.0.0"
-SELF = "f30054fa5d52"
+SELF = "a37ad31f829f"
 HOST = "https://query1.finance.yahoo.com"
 UA = "trading-agents-desk/2.0 (+https://github.com/Kantamaniprakash/trading-agents-lab)"
 # At least one letter or digit: dots alone are not a ticker.
@@ -21,12 +22,16 @@ TYPES = ("trailingPeRatio trailingForwardPeRatio trailingMarketCap trailingPegRa
          "trailingTotalRevenue trailingNetIncome quarterlyTotalRevenue quarterlyNetIncome "
          "quarterlyTotalDebt quarterlyStockholdersEquity").split()
 MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+# Seconds to wait before the one new attempt after a rate limit (HTTP 429).
+WAIT = 7
 STOPS = {
     "E_SYMBOL": "a symbol is 1 to 15 letters, digits, dots, hyphens, carets or equals signs, "
                 "with a letter or a digit among them",
     "E_NOT_FOUND": "the data source has no data for this symbol; check the spelling",
     "E_REFUSED": "the data source refused this network; this is not a problem with the ticker "
                  "and waiting rarely helps",
+    "E_BUSY": "the data source is limiting requests from this network right now; this is not a "
+              "problem with the ticker, and a new run in a few minutes may work",
     "E_NO_ROUTE": "could not reach the data source: no connection, or no answer in 10 seconds",
     "E_SERVER": "the data source answered with an error of its own; this is not a problem with "
                 "the ticker, and it may work later",
@@ -39,7 +44,8 @@ ERRORS = {
     "E_WRITE": "could not write the output file or print the result",
     "E_INTERNAL": "get_data.py failed unexpectedly; run the preflight to check this copy",
 }
-DOT = "; a share class is written with a hyphen there, not a dot (BRK-B, not BRK.B)"
+DOT = ("; a US share class is written with a hyphen there, not a dot (BRK-B, not BRK.B); for "
+       "another exchange, check the letters after the dot")
 ODD = "unexpected answer"
 
 
@@ -67,15 +73,21 @@ def http_get(url):
 
 def ask(url):
     """One JSON answer as (headers, data), or Stop with the fixed code."""
-    try:
-        status, headers, body = http_get(url)
-    except Exception as e:
-        why = getattr(e, "reason", e)
-        if "CERT" in (type(why).__name__ + str(why)).upper():
-            raise Stop("E_CERT", "certificate not trusted")
-        raise Stop("E_NO_ROUTE", "no connection")
+    for attempt in (1, 2):
+        try:
+            status, headers, body = http_get(url)
+        except Exception as e:
+            why = getattr(e, "reason", e)
+            if "CERT" in (type(why).__name__ + str(why)).upper():
+                raise Stop("E_CERT", "certificate not trusted")
+            raise Stop("E_NO_ROUTE", "no connection")
+        if status != 429 or attempt == 2:
+            break
+        # A rate limit often clears within seconds: wait once, then ask once more.
+        time.sleep(WAIT)
     if status != 200:
-        code = ("E_NOT_FOUND" if status == 404 else "E_REFUSED" if status in (401, 403, 429, 999)
+        code = ("E_NOT_FOUND" if status == 404 else "E_BUSY" if status == 429
+                else "E_REFUSED" if status in (401, 403, 999)
                 else "E_SERVER" if status >= 500 else "E_SHAPE")
         raise Stop(code, "HTTP %d" % status)
     try:
@@ -118,11 +130,17 @@ def real_day(text):
 
 
 def clean(text, n):
-    """One line of at most n characters: no control characters, plain spaces and minus."""
+    """One line of at most n characters: no control characters, plain spaces, minus, quotes."""
     if not isinstance(text, str):
         return ""
     # chr(8722) is the Unicode minus sign.
-    return " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", text).replace(chr(8722), "-").split())[:n]
+    text = re.sub(r"[\x00-\x1f\x7f]", " ", text).replace(chr(8722), "-")
+    # Typographic and fullwidth double quotes become the plain one, which render.py handles.
+    text = re.sub("[%s-%s%s]" % (chr(8220), chr(8223), chr(65282)), '"', text)
+    # Zero-width characters and direction marks print nothing and can reorder what follows.
+    marks = tuple(map(chr, (8203, 8207, 8234, 8238, 8294, 8297, 65279)))
+    text = re.sub("[%s-%s%s-%s%s-%s%s]" % marks, "", text)
+    return " ".join(text.split())[:n]
 
 
 def parse_chart(d):
@@ -195,9 +213,13 @@ def build(sym):
         raise Stop("E_SHAPE")
     news, e2 = extra("%s/v1/finance/search?q=%s&newsCount=10&quotesCount=0" % (HOST, s),
                      lambda a: parse_news(a, sym), [])
-    st, e3 = extra("%s/ws/fundamentals-timeseries/v1/finance/timeseries/%s?symbol=%s&type=%s"
-                   "&period1=%d&period2=%d" % (HOST, s, s, "%2C".join(TYPES), now - 800 * 86400,
-                                               now), parse_statements, {t: [] for t in TYPES})
+    st, e3 = {t: [] for t in TYPES}, None
+    # Only a company has statements: a fund, an index or a coin is not asked for any.
+    if chart["meta"].get("instrumentType") in (None, "EQUITY"):
+        st, e3 = extra("%s/ws/fundamentals-timeseries/v1/finance/timeseries/%s?symbol=%s"
+                       "&type=%s&period1=%d&period2=%d" % (
+                           HOST, s, s, "%2C".join(TYPES), now - 800 * 86400, now),
+                       parse_statements, st)
     return {"schema": "bundle.v1", "symbol": sym, "source": "yahoo-chart", "fetched_at": now,
             "chart": chart, "news": news, "statements": st,
             "errors": {"news": e2, "statements": e3}}
@@ -220,7 +242,7 @@ def say(stream, line):
 
 def main(argv):
     """Returns the exit code: 0 ok, 2 stop, 3 internal, 4 usage."""
-    code, sym, done = "E_USAGE", "", None
+    code, sym, done, status = "E_USAGE", "", None, ""
     try:
         if argv[:1] == ["--version"]:
             done = "trading-agents-desk get_data.py " + VERSION
@@ -233,11 +255,16 @@ def main(argv):
             with open(argv[1], "w", encoding="ascii", newline="\n") as out:
                 b = build(sym)
                 out.write(json.dumps(b) + "\n")
-            done = "DATA ok %s bars=%d headlines=%d statements=%s" % (
-                sym, len(b["chart"]["timestamp"]), len(b["news"]),
+            # A request that failed is named as failed, not as data the source lacks.
+            done = "DATA ok %s bars=%d headlines=%s statements=%s" % (
+                sym, len(b["chart"]["timestamp"]),
+                "failed" if b["errors"]["news"] else len(b["news"]),
+                "failed" if b["errors"]["statements"] else
                 "ok" if any(b["statements"].values()) else "absent")
     except Stop as e:
         code = e.args[0]
+        if str(e.args[-1]).startswith("HTTP "):
+            status = " (%s)" % e.args[-1]
     except OSError:
         code = "E_WRITE"
     except (Exception, KeyboardInterrupt):
@@ -248,7 +275,7 @@ def main(argv):
         code = "E_WRITE"
     if code in STOPS:
         hint = DOT if code == "E_NOT_FOUND" and "." in sym else ""
-        say(sys.stderr, "STOP %s %s%s" % (code, STOPS[code], hint))
+        say(sys.stderr, "STOP %s %s%s%s" % (code, STOPS[code], hint, status))
         return 2
     say(sys.stderr, "ERROR %s %s" % (code, ERRORS[code]))
     return 3 if code == "E_INTERNAL" else 4

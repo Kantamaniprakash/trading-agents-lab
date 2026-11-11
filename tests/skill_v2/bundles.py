@@ -81,20 +81,24 @@ def bundle(seed: int = 1, n: int = 260, symbol: str = "TEST", typ: str = "EQUITY
            currency: str = "USD", gmtoffset: int = -18000, start: float = 150.0,
            session: str = "finished", news: int = 3, with_statements: bool = True,
            rows: list | None = None, end: int = END, digits: int = 2,
-           name: str = "Test Instruments Inc.") -> dict:
+           name: str = "Test Instruments Inc.", every_day: bool | None = None) -> dict:
     """A bundle.v1 document as get_data.py writes it, with a plausible chart meta.
 
     ``session``: ``finished`` (fetched the night after the newest bar, so the current trading
-    period is the next one), ``unfinished`` (fetched two hours into the newest bar's session)
-    or ``after_close`` (fetched just after that session's end).
+    period is the next one), ``unfinished`` (fetched two hours into the newest bar's session,
+    the source's quote five seconds old) or ``after_close`` (fetched a quarter of an hour
+    after that session's end, the quote stamped one second after the end: a quote from
+    before the end would leave the session unfinished, see at_the_bell).
+    ``every_day``: a bar on every calendar day, as crypto has (the default for that type and
+    for no other); the session times stay the type's own.
     """
     crypto = typ == "CRYPTOCURRENCY"
     rows = walk(seed, n, start=start, digits=digits) if rows is None else rows
-    days = days_back(len(rows), end, every_day=crypto)
+    days = days_back(len(rows), end, every_day=crypto if every_day is None else every_day)
     open_s, close_s = (0, DAY - 60) if crypto else (34200, 57600)
     stamps = [d * DAY + open_s - gmtoffset for d in days]
     last_open, last_close = stamps[-1], days[-1] * DAY + close_s - gmtoffset
-    nxt = days[-1] + (1 if crypto or (days[-1] + 3) % 7 < 4 else 3)
+    nxt = days[-1] + (1 if crypto or every_day or (days[-1] + 3) % 7 < 4 else 3)
     if session == "unfinished":
         period, fetched, market_time = (last_open, last_close), last_open + 7200, last_open + 7195
     elif session == "after_close":
@@ -125,7 +129,10 @@ def bundle(seed: int = 1, n: int = 260, symbol: str = "TEST", typ: str = "EQUITY
         "schema": "bundle.v1", "symbol": symbol, "source": "yahoo-chart", "fetched_at": fetched,
         "chart": chart, "news": items,
         "statements": statements(end) if with_statements else {t: [] for t in STATEMENT_TYPES},
-        "errors": {"news": None, "statements": None if with_statements else "HTTP 404"}}
+        # No follow-up request failed. For a fund, an index or a coin get_data.py sends no
+        # statement request and writes these empty lists, and so does a source that has no
+        # figure for a share; rate_limited() is the bundle of a request that failed.
+        "errors": {"news": None, "statements": None}}
 
 
 def history_result(b: dict) -> dict:
@@ -177,6 +184,10 @@ def same_day_case(trade_first: bool = False, **kw) -> dict:
     """Shape D, Sydney after the close: the newest date has two rows. One is stamped at the
     session start and has no close; one is stamped at the last trade and has it.
 
+    As seen, the last trade is stamped before the regular end and the fetch came three hours
+    after it. A quote from before the end makes the session unfinished until half an hour
+    after the end, so the fetch time is part of the shape.
+
     ``trade_first`` writes the last-trade row before the session-start row in the arrays.
     """
     kw.setdefault("gmtoffset", 39600)
@@ -190,6 +201,8 @@ def same_day_case(trade_first: bool = False, **kw) -> dict:
     for i, k in enumerate(("timestamp",) + COLS):
         ch[k][-1:] = [both[0][i], both[1][i]]
     ch["meta"]["regularMarketTime"] = trade
+    assert trade < ch["meta"]["currentTradingPeriod"]["regular"]["end"]
+    b["fetched_at"] = ch["meta"]["currentTradingPeriod"]["regular"]["end"] + 10900
     return b
 
 
@@ -243,6 +256,38 @@ def behind_crypto(absent: bool = False) -> dict:
             del b["chart"][k][-2]
     else:
         _blank(b, -2)
+    return b
+
+
+def at_the_bell(quote: int | None, fetch: int, **kw) -> dict:
+    """Shape F, Hong Kong during its closing auction, and any fetch around a close: the
+    newest row is stamped at the regular session's start and the calendar still describes
+    that session. The source's own quote is stamped ``quote`` seconds after the regular end
+    (negative: before it; None: the meta holds no quote time) and the fetch comes ``fetch``
+    seconds after it."""
+    kw.setdefault("seed", 35)
+    b = bundle(session="unfinished", **kw)
+    meta = b["chart"]["meta"]
+    end = meta["currentTradingPeriod"]["regular"]["end"]
+    b["fetched_at"] = end + fetch
+    if quote is None:
+        del meta["regularMarketTime"]
+    else:
+        meta["regularMarketTime"] = end + quote
+    return b
+
+
+def outside_range(b: dict, side: str = "high", by: float = 0.0007, i: int = -1,
+                  column: str = "close") -> dict:
+    """Seen live for a coin during its day, after shapes A to F: the source's last price is
+    newer than its day-high field, so the close of the row in progress lies above that row's
+    own high (by 0.07 percent when seen). Puts ``column`` of row ``i`` the fraction ``by``
+    above the row's high, or below its low for ``side`` "low"."""
+    ch = b["chart"]
+    edge = ch[side][i]
+    ch[column][i] = round(edge * (1 + by if side == "high" else 1 - by), 6)
+    if i == -1 and column == "close":
+        ch["meta"]["regularMarketPrice"] = ch["close"][-1]
     return b
 
 
@@ -314,6 +359,27 @@ def unfinished() -> dict:
 def crypto(session: str = "unfinished") -> dict:
     return bundle(seed=21, typ="CRYPTOCURRENCY", gmtoffset=0, start=70000.0, session=session,
                   symbol="COIN-USD", with_statements=False, n=366, name="Coin USD")
+
+
+def every_day(n: int = 400, typ: str = "EQUITY", **kw) -> dict:
+    """A market with a bar on every calendar day under a type that is not crypto, or (as a
+    price file made from it) under no type at all. More than a year of rows by default."""
+    kw.setdefault("gmtoffset", 0)
+    return bundle(seed=28, n=n, typ=typ, every_day=True, **kw)
+
+
+def rate_limited(news: bool = True, statements: bool = True, label: str = "HTTP 429",
+                 **kw) -> dict:
+    """Seen live on a network the source was limiting: the bars arrived and a follow-up
+    request did not. The bundle then holds no headline or no statement figure, and its
+    errors block says why."""
+    b = bundle(seed=27, **kw)
+    if news:
+        b["news"], b["errors"]["news"] = [], label
+    if statements:
+        b["statements"] = {t: [] for t in STATEMENT_TYPES}
+        b["errors"]["statements"] = label
+    return b
 
 
 def minor_unit(currency: str = "GBp") -> dict:

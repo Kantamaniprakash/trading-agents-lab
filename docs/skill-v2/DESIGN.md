@@ -10,7 +10,8 @@ The exact file formats are in [CONTRACTS.md](CONTRACTS.md).
 A bull and a bear argue one stock from the same dated data. One script fetches the data and a
 second computes every indicator. The agent runs the desk and writes its report using named
 references to those figures. A third script inserts every figure from the data and prints the
-report, and a fourth can draw it as a clean page. The agent never types a market number.
+report, and a fourth can draw it as a clean page. The agent never types a market number in
+digits.
 
 The listing states up front that this desk design lost to buy-and-hold in its only test (-0.9%
 against +15.7%, one stock, one quarter). The skill sells checkable two-sided reasoning, never a
@@ -30,7 +31,7 @@ Four small scripts, Python standard library only (3.9 or newer), nothing install
 
 | Script | Network | Job |
 |---|---|---|
-| `get_data.py` | yes, one host | Downloads daily prices with session facts, headlines and statement figures. Reads no files. Identifies itself honestly, uses no cookies and no login step |
+| `get_data.py` | yes, one host | Downloads daily prices with session facts, headlines and, for a company, statement figures. Reads no files. Identifies itself honestly, uses no cookies and no login step |
 | `brief.py` | no | Validates the data, computes the indicators and about 80 named facts, writes every data problem as a flag and a note, prints the fact sheet the desk reads |
 | `render.py` | no | Reads the agent's draft, inserts every figure by reference, refuses any digit the agent typed, applies the decision rules, prints the report and saves it in resolved form for the page |
 | `page.py` | no | Draws the finished report as one self-contained page. An optional step |
@@ -64,8 +65,9 @@ and a statement figure is printed with its date wherever the script prints its l
 What it does not guarantee, and the listing says so: that the sentence around a figure is right
 or names the right fact, that the desk chose the facts that matter, or that its view is any good.
 Quantity words such as "half" and "double", and numbers spelled out in words, are counted and
-shown on the receipt as not checked. A headline is quoted so that it cannot end its own quotation:
-a double quote inside a title is shown as a single one.
+shown on the receipt as not checked ("one" and fractions such as "a fifth" are not counted). A
+headline is quoted so that it cannot end its own quotation with a double quote: one inside a
+title is shown as a single quote. Guillemets and two apostrophes are not covered.
 
 ### The page
 
@@ -106,11 +108,14 @@ with the data.
 ### Stops and flags
 
 A data problem is never analysed silently. Stops have fixed sentences written by the script: unknown
-symbol, refused by the data source, no route, an error at the source itself, certificate not
-trusted, too few bars, a gap in the dates, impossible prices, data older than 12 days or dated
-after the fetch, a saved price history whose dates cannot be read, an unsupported instrument type. Flags travel into
-the report: unfinished session, a close filled from the exchange's last regular price, prices
-behind, rows dropped, a shorter gap in the dates, fundamentals absent, no headlines, short history.
+symbol, refused by the data source, a rate limit at the source, no route, an error at the source
+itself, certificate not trusted, too few bars, a gap in the dates, impossible prices, a download
+older than 12 days or dated after the fetch, a saved price history whose dates cannot be read,
+an unsupported instrument type. A price file is taken as it is: the script cannot know how old
+it is, so the report says "prices from a file" and the agent is told to say when its newest date
+is old. Flags travel into the report: unfinished session, a close filled from the exchange's
+last regular price, prices behind, rows dropped, a shorter gap in the dates, fundamentals absent,
+no headlines, short history.
 
 The row rules follow the daily-row shapes the source was seen to send on 2026-11-11:
 
@@ -149,8 +154,10 @@ stale known answer. No formatter may rewrite a stamped script, so the formatter 
 ## What leaves the skill
 
 The run-time install, the paid API run, the backtest instructions, the web-search fallback for
-headlines and the timed retry rules. The Python package stays in this repository as the research
-lab, unchanged. The skill no longer installs it, so fixes no longer need a release tag.
+headlines and the timed retry rules of the skill text: the agent does not ask the data source
+again by itself. The download script alone asks once more, once, after a rate limit. The Python
+package stays in this repository as the research lab, unchanged. The skill no longer installs
+it, so fixes no longer need a release tag.
 
 ## Decisions and their reasons
 
@@ -174,7 +181,7 @@ lab, unchanged. The skill no longer installs it, so fixes no longer need a relea
   documented fail patterns, and stamped hashes and known answers.
 - The end-to-end test rebuilds the whole Markdown report from the brief and the draft, and
   compares every text on the page that holds a digit with the brief or the resolved report.
-- CI runs the shipped scripts on Python 3.9 and the newest release on Linux, macOS and Windows.
+- CI runs the shipped scripts on Python 3.9, 3.13, 3.14 and 3.15 on Linux, macOS and Windows.
 - A nightly canary classifies each run as ok, refused or changed, and opens an issue only on changed.
 
 ## Phases
@@ -191,7 +198,7 @@ lab, unchanged. The skill no longer installs it, so fixes no longer need a relea
 
 | Risk | Mitigation |
 |---|---|
-| Yahoo changes or refuses the endpoints | One fixed identity, no retries, a fixed stop sentence that says the fault is at the source, the price-file route, the canary, and updates that reach every buyer because skills reload |
+| Yahoo changes or refuses the endpoints | One fixed identity, no retries but the one new attempt after a rate limit, a fixed stop sentence that says the fault is at the source and names the HTTP status, the price-file route, the canary, and updates that reach every buyer because skills reload |
 | The buyer's host has no internet from its code tool | The price-file route, and a host table on the listing that says what was tested |
 | An agent copies a script wrongly | Self-hash and known-answer tests stop the run |
 | The stamp lends a weak view more authority than it deserves | The receipt says in fixed words what is and is not guaranteed, and the test the desk lost is on every report |

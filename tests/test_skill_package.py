@@ -8,6 +8,7 @@ files of that folder. Nothing here uses the network.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -247,6 +248,10 @@ VIOLATIONS = [
     (PAGE, "X = open('extra.html', 'w')\n", r"open\(\) must take a path from the command line"),
     (PAGE, "import urllib.request\n", "imports urllib.request"),
     (PAGE, "import os\n", "imports os"),
+    # the pause after a rate limit is get_data.py's alone: no other script may wait
+    (PY, "import time\n", "imports time"),
+    ("scripts/brief.py", "import time\n", "imports time"),
+    (PAGE, "from time import sleep\n", "imports from time"),
     (PAGE, "X = f'{VERSION}'\n", "uses an f-string"),
     (PAGE, "X = (Y := 1)\nmatch X:\n  case _:\n    pass\n", "not Python 3.9 grammar"),
     (PY, 'SELF = "0123456789ab"\n', "exactly one line SELF"),
@@ -359,6 +364,7 @@ def test_the_lint_fails_the_build(tmp_path, name, added, problem):
     (MD, "Never store a password or an API key in the draft.\n"),
     (ROLES, "The quarterlyStockholdersEquity and trailingForwardPeRatio series are long names.\n"),
     ("scripts/get_data.py", "# https://query1.finance.yahoo.com/v8/finance/chart/X?range=1y\n"),
+    ("scripts/get_data.py", "import time as clock\n"),
     # A semicolon in a string, in a comment or in the style sheet is not a second statement.
     (PY, "X = 'a; b'  # one; statement\n"),
     (PY, 'X = """a{b:1;c:2}\nd{e:3;f:4}"""\n'),
@@ -392,13 +398,17 @@ def test_every_script_parses_as_python_3_9_and_keeps_to_its_imports():
             elif isinstance(node, ast.ImportFrom):
                 seen.add(node.module)
         base = {"sys", "json", "math", "re", "hashlib", "datetime", "html"}
-        network = {"urllib.request", "urllib.parse", "urllib.error"}
+        # `time` is for the one pause before the one new attempt after a rate limit.
+        network = {"urllib.request", "urllib.parse", "urllib.error", "time"}
         assert seen <= (base | network if name == "get_data.py" else base), (name, seen)
-    # Only get_data.py may reach the network.
+        assert build_skill.ALLOWED_IMPORTS[name] == (
+            base | network if name == "get_data.py" else base), name
+    # Only get_data.py may reach the network, and only get_data.py may wait.
     assert sorted(build_skill.ALLOWED_IMPORTS) == sorted(build_skill.SCRIPT_NAMES)
     for name in ("brief.py", "render.py", "page.py"):
         assert build_skill.ALLOWED_IMPORTS[name] == build_skill.ALLOWED_IMPORTS["brief.py"]
-        assert not any("urllib" in x for x in build_skill.ALLOWED_IMPORTS[name])
+        assert not any("urllib" in x or x == "time" for x in build_skill.ALLOWED_IMPORTS[name])
+    assert "import time\n" in (SCRIPTS / "get_data.py").read_text(encoding="ascii")
     # get_data.py reads no file; each of the others writes exactly once.
     assert build_skill.ALLOWED_OPENS == {
         "get_data.py": {"w": 1}, "brief.py": {"rb": 2, "w": 1},
@@ -487,9 +497,32 @@ def test_the_build_hashes_a_script_the_way_the_scripts_hash_themselves():
         "get_data.py page.py render.py" % sys.version_info[:3]
 
 
-def test_only_the_stamp_line_itself_is_outside_the_hash(tmp_path):
+_STAMP = re.compile(rb'(?m)^SELF = "[0-9a-f]{12}"\n')
+_VERSION_AND_STAMP = re.compile(rb'(?m)^(VERSION = "2\.0\.0"\n)(SELF = "[0-9a-f]{12}"\n)')
+# What can be done to the stamp line of a script while every other line stays as it was,
+# and what the lint says of the copy. Each of these used to hash as the untouched script.
+STAMP_LINE_CHANGES = [
+    ("a second stamp line above it", "must hold exactly one line SELF",
+     lambda d: _STAMP.sub(lambda m: b'SELF = "0123456789ab"\n' + m.group(), d)),
+    ("the stamp line twice", "must hold exactly one line SELF",
+     lambda d: _STAMP.sub(lambda m: m.group() * 2, d)),
+    ("the stamp line one line up", "its integrity stamp is stale or missing",
+     lambda d: _VERSION_AND_STAMP.sub(rb"\2\1", d)),
+    ("no stamp line", "must hold exactly one line SELF", lambda d: _STAMP.sub(b"", d)),
+]
+
+
+def old_rule_hash(data: bytes) -> str:
+    """The hash as it was before the stamp line kept its place in it: that line left out."""
+    text = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    kept = [line.rstrip() for line in text.split(b"\n")
+            if not re.fullmatch(rb'SELF = "[0-9a-f]{12}"', line.rstrip())]
+    return hashlib.sha256(b"\n".join(kept).rstrip()).hexdigest()[:12]
+
+
+def test_only_the_stamp_line_itself_is_read_as_the_word_self(tmp_path):
     # One rule for the build and for the three scripts that check themselves. A line that
-    # merely starts like the stamp used to be left out too, so code on it passed the
+    # merely starts like the stamp used to be left out of the hash, so code on it passed the
     # preflight; and a byte-order mark passed in one script and failed in two.
     text = b'A = 1\nSELF = "0123456789ab"\nB = 2\n'
     good = build_skill.script_hash(text)
@@ -503,34 +536,115 @@ def test_only_the_stamp_line_itself_is_outside_the_hash(tmp_path):
                   text.replace(b"A = 1", b"A\xc2\xa0= 1")):
         assert build_skill.script_hash(other) != good, other
     # Another stamp on the stamp line, and blanks after it, change nothing.
-    for other in (b'A = 1\nSELF = "ffffffffffff"\nB = 2\n', b'A = 1\nSELF = "0123456789ab"  \nB = 2\n'):
+    for other in (b'A = 1\nSELF = "ffffffffffff"\nB = 2\n',
+                  b'A = 1\nSELF = "0123456789ab"  \nB = 2\n'):
         assert build_skill.script_hash(other) == good, other
     # The scripts apply the same rule to themselves and to each other.
     brief, page = load_script("brief.py"), load_script("page.py")
     for name in build_skill.SCRIPT_NAMES:
         data = (SCRIPTS / name).read_bytes()
-        for change in (lambda d: b"\xef\xbb\xbf" + d,
+        for change in [lambda d: b"\xef\xbb\xbf" + d,
                        lambda d: d.replace(b"\nSELF = ", b'\nSELF = len("x")\nSELF = ', 1),
-                       lambda d: d.replace(b"\n", b"\r\n"), lambda d: d + b"\n\n"):
+                       lambda d: d.replace(b"\n", b"\r\n"), lambda d: d + b"\n\n"] + [
+                           change for _, _, change in STAMP_LINE_CHANGES]:
             changed = change(data)
+            assert changed != data
             scratch = tmp_path / name
             scratch.write_bytes(changed)
             assert brief.digest(str(scratch)) == page.digest(str(scratch)) \
                 == build_skill.script_hash(changed), name
 
 
-def test_the_hash_ignores_line_endings_trailing_blanks_and_the_self_line():
+def test_the_hash_ignores_line_endings_trailing_blanks_and_the_value_of_the_stamp():
     text = b'A = 1\nSELF = "0123456789ab"\nB = 2\n'
+    good = build_skill.script_hash(text)
     same = [
         b'A = 1\r\nSELF = "0123456789ab"\r\nB = 2\r\n',
         b'A = 1  \nSELF = "ffffffffffff"\nB = 2\t\n\n\n',
-        b'A = 1\rB = 2',
+        b'A = 1\rSELF = "000000000000"\rB = 2',
     ]
     for other in same:
-        assert build_skill.script_hash(other) == build_skill.script_hash(text)
-    for other in (b'A = 2\nB = 2\n', b' A = 1\nB = 2\n', b'A = 1\n\nB = 2\n', b'A = 1\nB = 2\nC\n'):
-        assert build_skill.script_hash(other) != build_skill.script_hash(text)
-    assert re.fullmatch("[0-9a-f]{12}", build_skill.script_hash(text))
+        assert build_skill.script_hash(other) == good
+    for other in (text.replace(b"A = 1", b"A = 2"), b" " + text,
+                  text.replace(b"A = 1\n", b"A = 1\n\n"), text + b"C\n"):
+        assert build_skill.script_hash(other) != good
+    assert re.fullmatch("[0-9a-f]{12}", good)
+    # Worked out by hand: the three lines with LF between them, the stamp line as one word.
+    assert good == hashlib.sha256(b"A = 1\nSELF\nB = 2").hexdigest()[:12]
+
+
+def test_a_second_a_moved_or_a_missing_stamp_line_changes_the_hash():
+    # The stamp line keeps its place in the hash. It used to be left out of it, so a text
+    # with two stamp lines, with its stamp in another place or with none hashed as the
+    # stamped text, and such a script passed the preflight.
+    stamp = b'SELF = "0123456789ab"\n'
+    text = b"A = 1\n" + stamp + b"B = 2\n"
+    others = {
+        "the stamp line twice": b"A = 1\n" + stamp + stamp + b"B = 2\n",
+        "a second stamp line above": b'SELF = "ffffffffffff"\n' + text,
+        "a second stamp line at the end": text + b'SELF = "000000000000"\n',
+        "the stamp line moved up": stamp + b"A = 1\nB = 2\n",
+        "the stamp line moved down": b"A = 1\nB = 2\n" + stamp,
+        "no stamp line": b"A = 1\nB = 2\n",
+    }
+    hashes = {what: build_skill.script_hash(data) for what, data in others.items()}
+    assert build_skill.script_hash(text) not in hashes.values(), hashes
+    assert len(set(hashes.values())) == len(hashes), hashes
+    # What made this a hole: by the old rule all of them were the same text.
+    assert {old_rule_hash(data) for data in others.values()} == {old_rule_hash(text)}
+
+
+@pytest.mark.parametrize("name", ["get_data.py", "render.py", "page.py", "brief.py"])
+def test_the_build_refuses_a_script_with_a_second_a_moved_or_a_missing_stamp_line(tmp_path, name):
+    stamped = (SCRIPTS / name).read_bytes().replace(b"\r\n", b"\n")
+    for number, (what, problem, change) in enumerate(STAMP_LINE_CHANGES):
+        skill = copy_skill(tmp_path / str(number))
+        changed = change(stamped)
+        assert changed != stamped, what
+        (skill / "scripts" / name).write_bytes(changed)
+        # The hash of the copy is no longer the stamp it carries, though by the old rule
+        # nothing had changed.
+        assert build_skill.script_hash(changed) != stamp_of(SCRIPTS / name), what
+        assert old_rule_hash(changed) == old_rule_hash(stamped), what
+        assert any(x.startswith("scripts/%s: %s" % (name, problem))
+                   for x in build_skill.lint(skill)), (what, build_skill.lint(skill))
+        with pytest.raises(ValueError, match=problem):
+            build_skill.build(skill, tmp_path / "out")
+        assert not (tmp_path / "out").exists()
+    # The word SELF alone in place of the stamp line is what the hash reads a stamp line as.
+    # Such a copy holds no stamp, and the lint says so. Its hash is the stamped copy's: the
+    # preflight passes it, and Python then stops at that line. A known limit of the rule,
+    # held as it is here and, on the scripts themselves, in tests/skill_v2/test_portable.py.
+    skill = copy_skill(tmp_path / "word")
+    (skill / "scripts" / name).write_bytes(_STAMP.sub(b"SELF\n", stamped))
+    assert build_skill.script_hash(_STAMP.sub(b"SELF\n", stamped)) == stamp_of(SCRIPTS / name)
+    assert 'scripts/%s: must hold exactly one line SELF = "<12 hex>"' % name \
+        in build_skill.lint(skill)
+    # Nor can it be stamped: there is no stamp line to write to, and a script with a known
+    # answer does not even load.
+    with pytest.raises(ValueError, match="scripts/%s: (expected exactly one SELF line|its "
+                                         "known-answer function could not be run)" % name):
+        build_skill.stamp(skill)
+
+
+@pytest.mark.parametrize("name", ["get_data.py", "render.py", "page.py", "brief.py"])
+def test_a_stamp_of_zeros_under_the_stamp_line_is_refused_by_the_build(tmp_path, name):
+    # Such a copy takes itself for a development copy when it runs: it warns and does its
+    # job (by design, held in tests/skill_v2/test_portable.py). To the build and to the
+    # preflight it is an altered file: the added line changes the hash.
+    stamped = (SCRIPTS / name).read_bytes().replace(b"\r\n", b"\n")
+    changed = _STAMP.sub(lambda m: m.group() + b'SELF = "%s"\n' % BLANK.encode(), stamped)
+    assert len(changed) == len(stamped) + 22
+    assert build_skill.script_hash(changed) not in (stamp_of(SCRIPTS / name), BLANK)
+    skill = copy_skill(tmp_path)
+    (skill / "scripts" / name).write_bytes(changed)
+    assert 'scripts/%s: must hold exactly one line SELF = "<12 hex>"' % name \
+        in build_skill.lint(skill)
+    with pytest.raises(ValueError, match="must hold exactly one line SELF"):
+        build_skill.build(skill, tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+    with pytest.raises(ValueError, match="scripts/%s: expected exactly one SELF line" % name):
+        build_skill.stamp(skill)
 
 
 @pytest.mark.parametrize("changed,stale", [
@@ -776,6 +890,76 @@ def test_check_mode_writes_nothing_and_fails_on_a_stale_stamp(monkeypatch, tmp_p
     assert stamp_of(skill / "scripts" / "brief.py", "KAT") == BLANK, "--check writes nothing"
 
 
+def stamp_by_the_old_rule(skill: Path) -> dict[str, str]:
+    """Stamp a copy the way the build did before the rule changed: each script with its hash
+    without the stamp line, brief.py last with the three others' in SIBLINGS. Returns the
+    stamps written."""
+    written: dict[str, str] = {}
+    for name in build_skill.SCRIPT_NAMES:
+        path = skill / "scripts" / name
+        data = path.read_bytes()
+        if name == "brief.py":
+            held = json.dumps({n: written[n] for n in build_skill.SIBLING_NAMES})
+            data, count = re.subn(rb"(?m)^SIBLINGS = \{.*\}$", b"SIBLINGS = " + held.encode(), data)
+            assert count == 1
+        written[name] = old_rule_hash(data)
+        data, count = re.subn(rb'(?m)^SELF = "[0-9a-f]{12}"$',
+                              b'SELF = "%s"' % written[name].encode(), data)
+        assert count == 1
+        path.write_bytes(data)
+    return written
+
+
+def test_check_mode_refuses_stamps_computed_by_the_old_rule(monkeypatch, tmp_path, capsys):
+    """A package stamped before the stamp line kept its place in the hash: by the old rule
+    every stamp in it is right. --check must fail on each script, and change nothing."""
+    skill = copy_skill(tmp_path)
+    scripts = skill / "scripts"
+    written = stamp_by_the_old_rule(skill)
+    before = {name: (scripts / name).read_bytes() for name in build_skill.SCRIPT_NAMES}
+    for name, data in before.items():
+        assert stamp_of(scripts / name) == written[name] == old_rule_hash(data)
+        assert written[name] not in (build_skill.script_hash(data), stamp_of(SCRIPTS / name))
+    assert json.loads(re.findall(rb"(?m)^SIBLINGS = (\{.*\})$", before["brief.py"])[0]) == {
+        name: written[name] for name in build_skill.SIBLING_NAMES}
+    assert build_skill.stale_stamps(skill) == list(build_skill.SCRIPT_NAMES)
+    assert build_skill.stale_known_answers(skill) == []
+
+    monkeypatch.setattr(build_skill, "SKILL_DIR", skill)
+    monkeypatch.setattr(build_skill, "DIST_DIR", tmp_path / "dist")
+    with pytest.raises(SystemExit) as exc:
+        build_skill.main(["--check"])
+    assert exc.value.code == 1
+    out, err = capsys.readouterr()
+    assert out == "" and err.startswith("error: 4 problem(s) in the package:\n")
+    for name in build_skill.SCRIPT_NAMES:
+        assert ("scripts/%s: its integrity stamp is stale or missing; run python "
+                "skill/build_skill.py to stamp it\n" % name) in err
+    assert {name: (scripts / name).read_bytes() for name in before} == before
+    assert not (tmp_path / "dist").exists()
+    # One script with an old-rule stamp among three fresh ones is found as well.
+    for name in build_skill.SCRIPT_NAMES:
+        one = copy_skill(tmp_path / ("one-" + name[:-3]))
+        (one / "scripts" / name).write_bytes(_STAMP.sub(
+            b'SELF = "%s"\n' % old_rule_hash((SCRIPTS / name).read_bytes()).encode(),
+            (SCRIPTS / name).read_bytes()))
+        assert build_skill.stale_stamps(one) == [name]
+    # The scripts refuse the old stamps too: each one that checks itself, and the preflight.
+    for name, args in (("brief.py", ["--preflight", str(scripts)]), ("render.py", ["--version"]),
+                       ("page.py", ["--version"])):
+        done = subprocess.run([sys.executable, "-I", "-B", str(scripts / name)] + args,
+                              capture_output=True, timeout=120)
+        assert done.returncode == 3 and done.stdout == b"", (name, done.stdout)
+        assert done.stderr.startswith(b"ERROR E_SELF "), (name, done.stderr)
+    # The build of today stamps the copy back to the bytes that ship, and then it checks.
+    assert build_skill.stamp(skill) == list(build_skill.SCRIPT_NAMES)
+    for name in build_skill.SCRIPT_NAMES:
+        assert (scripts / name).read_bytes() == \
+            (SCRIPTS / name).read_bytes().replace(b"\r\n", b"\n"), name
+    build_skill.main(["--check"])
+    assert capsys.readouterr().out.startswith("check ok: stamps and known answers fresh")
+
+
 def test_main_fails_without_writing_when_the_lint_fails(monkeypatch, tmp_path, capsys):
     skill = copy_skill(tmp_path)
     append(skill / "SKILL.md", "First run `pip install requests`.\n")
@@ -889,16 +1073,20 @@ def test_the_listing_describes_the_four_script_package_and_the_page_as_they_are(
     assert "four Python scripts" in flat and "The ZIP ships four scripts" in flat
     assert not re.search(r"(?i)(?<!other )\b(three|two|3|2) (Python )?scripts\b", flat)
     assert "The other three scripts cannot import a network module" in flat
-    # Every agent host stays "not tested yet" until someone has run the skill on it.
-    rows = dict(re.findall(r"(?m)^\| (.+?) \| (.+?) \|$", text.split(
-        "What has been tried so far", 1)[1].split("Rows change to", 1)[0]))
-    for host in ("Claude Code, run by the agent from the installed skill",
-                 "Claude desktop app or claude.ai with a code tool", "Codex CLI", "Cursor",
-                 "The four scripts on macOS and on Windows"):
-        assert rows[host] == "not tested yet", host
-    assert all(status.startswith(("tested", "not tested yet")) for what, status in rows.items()
-               if what not in ("What", "---"))
-    assert sum(status.startswith("not tested yet") for status in rows.values()) >= 7
+    # The table says what was run. No agent host is named as tested in it: a row about an
+    # agent or about a buyer's host says "not tested yet" or points at the release notes.
+    table = text.split("What has been tried so far", 1)[1].split("### Limits", 1)[0]
+    rows = dict(re.findall(r"(?m)^\| (.+?) \| (.+?) \|$", table))
+    rows = {what: status for what, status in rows.items() if what not in ("What", "---")}
+    assert len(rows) >= 5, rows
+    for what, status in rows.items():
+        assert status.startswith(("tested", "not tested yet", "see the release notes")), what
+        if re.search(r"(?i)\bagent\b|\bhost\b|claude|codex|cursor", what):
+            assert not status.startswith("tested"), what
+    assert any(re.search(r"(?i)\bagent\b", what) for what in rows)
+    assert rows["The page as a buyer's host shows it"].startswith("not tested yet")
+    assert 'Rows change to "tested" only after a real run on that host.' in " ".join(
+        table.split())
     # The page: optional, and described part by part in the order page.py draws it.
     page = flat.split("The same report can be drawn as one HTML page.", 1)[1].split(
         "### What it needs", 1)[0]
@@ -988,8 +1176,8 @@ def test_the_canary_runs_the_committed_scripts_and_classifies_the_run():
     assert "schedule:" in text and "workflow_dispatch:" in text
     assert re.search(r'cron: "\d+ \d+ \* \* \*"', text)
     assert "build_skill" not in text, "the canary stamps nothing"
-    for needed in ("get_data.py", "brief.py", "E_REFUSED", "E_NO_ROUTE", "E_CERT", "E_SHAPE",
-                   "E_INPUT", "::notice", "::error"):
+    for needed in ("get_data.py", "brief.py", "E_REFUSED", "E_BUSY", "E_NO_ROUTE", "E_CERT",
+                   "E_SHAPE", "E_INPUT", "::notice", "::error"):
         assert needed in text, needed
     assert "upload-artifact" not in text, "fetched market data must not be kept"
     # The commands are the scripts' own command lines, and every code is one they print.
@@ -1004,6 +1192,22 @@ def test_the_canary_runs_the_committed_scripts_and_classifies_the_run():
     assert "E_PENDING" not in text and "pending" not in text.lower()
     # A brief with a flag is still a brief: prices_behind is said, not failed.
     assert "prices_behind" in text and "# Flags" in text
+    # The three symbols: a share, a share quoted in pence and a coin. The coin is the one
+    # the scripts ask for no statements, and the header says how its line reads.
+    assert 'SYMBOLS = ("NVDA", "SHEL.L", "BTC-USD")' in text
+    assert "statements=absent" in text
+    source = (SCRIPTS / "get_data.py").read_text("ascii")
+    assert "statements=%s" in source and 'else "absent")' in source
+    # Every stop get_data.py can make on a symbol that is well formed has its class. One
+    # that the step does not name would be read as a stop brief.py made on the day's data.
+    script = canary_script()
+    classes = {name: set(re.findall(r'"(E_[A-Z_]+)"', re.search(
+        r"(?m)^%s = \((.*)\)$" % name, script).group(1))) for name in ("REFUSED", "CHANGED")}
+    stops = set(load_script("get_data.py").STOPS)
+    assert stops - {"E_SYMBOL"} == stops & (classes["REFUSED"] | classes["CHANGED"])
+    # The source turning this network away, for good or for now, is not a fault to fix here.
+    assert classes["REFUSED"] == {"E_REFUSED", "E_BUSY", "E_NO_ROUTE", "E_SERVER", "E_CERT"}
+    assert classes["CHANGED"] == {"E_SHAPE", "E_NOT_FOUND", "E_INPUT"}
 
 
 def canary_script() -> str:
@@ -1030,6 +1234,28 @@ sys.exit(code)
                       "SHEL.L": (2, "STOP E_NO_ROUTE could not reach the data source"),
                       "BTC-USD": (2, "STOP E_CERT the secure connection was not trusted")}},
      ["refused", "refused", "refused"], 0),
+    # A rate limit that outlasted the one new attempt, and an error of the source's own:
+    # the source turned this network away for now. A notice, and the job passes.
+    ({"get_data.py": {"NVDA": (2, "STOP E_BUSY the data source is limiting requests from this "
+                                  "network right now; this is not a problem with the ticker, "
+                                  "and a new run in a few minutes may work (HTTP 429)"),
+                      "BTC-USD": (2, "STOP E_SERVER the data source answered with an error of "
+                                     "its own (HTTP 503)")}},
+     ["refused", "ok", "refused"], 0),
+    ({"get_data.py": {"NVDA": (2, "STOP E_BUSY limiting"), "SHEL.L": (2, "STOP E_BUSY limiting"),
+                      "BTC-USD": (2, "STOP E_BUSY limiting")}},
+     ["refused", "refused", "refused"], 0),
+    # A follow-up request that failed is still a run with data: the line says which.
+    ({"get_data.py": {"NVDA": (0, "DATA ok NVDA bars=251 headlines=failed statements=failed")}},
+     ["ok", "ok", "ok"], 0),
+    # A coin is not asked for statements, so its line says "absent" on every night.
+    ({"get_data.py": {"BTC-USD": (0, "DATA ok BTC-USD bars=366 headlines=10 statements=absent")}},
+     ["ok", "ok", "ok"], 0),
+    # The day's row of a coin is in progress at any hour. A price outside its published
+    # range is widened into it now; a stop on impossible prices is still a stop.
+    ({"brief.py": {"BTC-USD": (2, "STOP E_OHLC the prices for 2026-11-10 are impossible (zero, "
+                                  "negative or outside the day's range)")}},
+     ["ok", "ok", "stopped"], 0),
     ({"brief.py": {"BTC-USD": (2, "STOP E_GAP the daily history is broken between two dates")}},
      ["ok", "ok", "stopped"], 0),
     # The source is a session behind: brief.py cuts the view, flags it and exits 0.
@@ -1075,3 +1301,7 @@ def test_the_canary_script_puts_each_run_in_its_class(tmp_path, answers, classes
             assert mark.endswith(" / BRIEF ok SHEL.L / flags: prices_behind"), mark
         elif " ok::" in mark:
             assert mark.endswith(" / flags: none"), mark
+    # The data line is shown as get_data.py printed it, a failed follow-up request included.
+    for symbol, (code, line) in answers.get("get_data.py", {}).items():
+        if code == 0:
+            assert "::notice title=Canary %s ok::%s / " % (symbol, line) in done.stdout

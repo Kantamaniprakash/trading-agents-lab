@@ -81,14 +81,15 @@ def brief(seed: int = 1, symbol: str = "TEST", name: str = "Test Instruments Inc
           statements: bool = True, headlines: int = 3, start: float = 150.0,
           rows: int = 260, drift: float = 0.0, source: str = "yahoo-chart",
           filled: bool = False, dropped: bool = False, behind: bool = False,
-          gap: bool = False) -> dict:
+          gap: bool = False, failed: bool = False) -> dict:
     """A brief.v1 document. ``rows`` under 200 leaves out the 200-day and 52-week facts.
 
     ``filled``, ``dropped``, ``behind`` and ``gap`` add the flag and the note brief.py writes
     for a filled close, a dropped row, a source that is behind and a hole in the dates, and
     shape the dates to match: ``behind`` ends the view one session before END, ``dropped``
     takes one date out and ``gap`` takes four sessions in a row out (seven calendar days
-    between two rows)."""
+    between two rows). ``failed`` words the notes for absent statements and absent headlines
+    the way brief.py does when the request for them failed; the flags are the same."""
     rng = random.Random(seed)
     D = weekdays(rows + dropped + 4 * gap, END - datetime.timedelta(days=1) if behind else END)
     if gap:
@@ -173,6 +174,7 @@ def brief(seed: int = 1, symbol: str = "TEST", name: str = "Test Instruments Inc
         facts["ret%d" % k] = fact(pc(c[-1], c[-1 - k]), "%d-day return" % k, "pct", True)
     facts["vol21"] = fact(rng.uniform(12, 70), "21-day annualised volatility", "pct")
     for k, fn in (("high", max), ("low", min)):
+        # brief.py: more than 0.79 of a year of rows, which is 200 on this five-day week.
         if n < 200:
             missing += [k + "52", k + "52_date", k + "52_gap"]
             continue
@@ -239,7 +241,7 @@ def brief(seed: int = 1, symbol: str = "TEST", name: str = "Test Instruments Inc
         note("The source gave no session times, so the newest row may not be final.")
     if source == "price-file":
         fetched_at = D[-1] + " 00:00 UTC"
-        note("These prices came from a file, so the time they were downloaded is not known.")
+        note("These prices came from a file; when they were downloaded is not known.")
     if session == "unfinished":
         note("The session of %s was unfinished at the fetch: its price, range and volume are "
              "not final." % D[-1], "unfinished_session")
@@ -249,12 +251,14 @@ def brief(seed: int = 1, symbol: str = "TEST", name: str = "Test Instruments Inc
         note("Too little history (%d daily rows) or a division by zero, so these facts are "
              "absent: %s." % (n, ", ".join(missing)))
     if not statements:
-        note("The source gave no statement figure, so these facts are absent: %s."
-             % ", ".join(STATEMENT_FACTS), "statements_absent")
+        note("%s, so these facts are absent: %s."
+             % ("The statement request failed" if failed else "The source gave no statement "
+                "figure", ", ".join(STATEMENT_FACTS)), "statements_absent")
     heads = [{"id": "h%d" % (j + 1), "date": D[-1 - j % 3], "publisher": p, "title": t}
              for j, (p, t) in enumerate(HEADLINES[:headlines])]
     if not heads:
-        note("No headlines came with this data.", "no_headlines")
+        note("The headline request failed." if failed else "No headlines came with this data.",
+             "no_headlines")
 
     k = max(0, n - 120)
     data = "".join("%s,%r,%r,%r,%r,%r;" % (D[j], o[j], h[j], lo[j], c[j], v[j]) for j in range(n))
@@ -316,6 +320,16 @@ def price_file() -> dict:
     """Built from a price file: no session facts, no statements, no headlines, no name."""
     return brief(seed=19, symbol="FILE", name="FILE", typ="UNKNOWN", session="unknown",
                  statements=False, headlines=0, source="price-file")
+
+
+def limited() -> dict:
+    """The source was limiting requests: the bars arrived, the statement request and the
+    headline request failed. The facts and flags are those of bare(); two notes differ.
+
+    Not in FIXTURES: test_render.py pairs every name there with a bundle of its own.
+    test_brief.py holds this one to what brief.py writes."""
+    return brief(seed=20, symbol="BUSY", name="Busy Source Corp", statements=False, headlines=0,
+                 failed=True)
 
 
 FIXTURES = {"ordinary": ordinary, "unfinished": unfinished, "bare": bare, "minor": minor,

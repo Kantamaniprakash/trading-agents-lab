@@ -175,7 +175,9 @@ def timeseries_answer(symbol="NVDA", seed=1, empty=("trailingPegRatio",), now=FE
                       currency="USD", null_entry=False):
     """The fundamentals-timeseries answer.
 
-    Types named in `empty` come back with meta only; for crypto that is all ten.
+    Types named in `empty` come back with meta only; for crypto that is all ten, which is
+    why the script now sends this request for a share alone (a chart meta whose
+    instrumentType is EQUITY or absent).
     null_entry puts a null inside the quarterly lists. None was in the recorded answers;
     the script skips one all the same.
     """
@@ -230,17 +232,38 @@ def not_found(date=DATE):
 
 
 def refused(status=429, date=DATE):
-    """A refusal: a short text body, no JSON. Only the status matters to the script;
-    no refusal was in the recorded answers, so the body is a stand-in."""
+    """A refusal: a short text body, no JSON. Only the status matters to the script. The
+    recorded runs met status 429 (a rate limit) on the two follow-up requests; a bundle
+    keeps the status and nothing else of such an answer, so the body is a stand-in."""
     headers = {"content-type": "text/html", "date": date, "server": "ATS"}
     return status, headers, b"Too Many Requests\r\n"
+
+
+def in_turn(*answers):
+    """A route for FakeYahoo that gives one answer per request, in the order written: a
+    (status, headers, body) triple, or an exception to raise. ``left`` holds the answers
+    not asked for yet; a request after the last one raises AssertionError."""
+    left = list(answers)
+
+    def route(url):
+        if not left:
+            raise AssertionError("more requests than answers: " + url)
+        answer = left.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    route.left = left
+    return route
 
 
 class FakeYahoo:
     """Stands in for get_data.http_get and records every URL asked.
 
     Each of the three routes holds a (status, headers, body) triple, an exception to
-    raise, or a function taking the URL. A route left unset answers with a healthy fake.
+    raise, or a function taking the URL. A route left unset answers with a healthy fake:
+    the statement route holds figures whatever the chart's type, so a bundle without them
+    means the request was not sent (see ``calls``) or failed.
     """
 
     MARKS = (("chart", "/v8/finance/chart/"), ("search", "/v1/finance/search"),

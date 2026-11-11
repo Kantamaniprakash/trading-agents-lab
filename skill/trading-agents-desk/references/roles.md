@@ -1,8 +1,7 @@
 # Desk roles
 
 The desk has twelve roles in four stages. Run them in this order. Each role
-sees only the inputs listed for it. The briefs follow the prompts of the
-open-source lab's pipeline (see `lab.md`).
+sees only the inputs listed for it.
 
 "The fact sheet" means everything `brief.py` printed: the facts, the notes,
 the flags and the headlines.
@@ -11,7 +10,8 @@ the flags and the headlines.
 
 - The evidence is the fact sheet. A note outranks a figure: if a note says the
   newest row is an unfinished session, no role may treat that row's price or
-  volume as final.
+  volume as final. Every average, gap, return and indicator includes that
+  row, so never credit one to finished sessions.
 - If the sheet carries the flag `prices_behind`, its newest row is not the
   newest session: the source has not published that one yet. No role may call
   the newest row today's price or the latest session. If it carries
@@ -27,18 +27,16 @@ the flags and the headlines.
   example to judge which headlines are about it. It may not use remembered
   prices, results, events or news about the company, its sector or the market,
   whether from before or after the data date.
-- Cite facts by name, with the value from the sheet beside it if that helps
-  (for example "rsi14, under the oversold line"). The script does not check
-  working notes, so copy values with care.
+- Cite facts by name, with the sheet's value beside it if that helps. The
+  script does not check working notes, so copy values with care.
 - No arithmetic. A role does not add, subtract, divide, average or annualise
   anything. A figure that is not on the fact sheet is described in words
   ("the price is under all three averages", "volume was heavier than usual"),
   never computed, estimated or recalled.
 - If a fact is missing, say that it is missing. Do not fill the gap.
-- Headline dates are calendar dates. A headline can be dated one day after
-  `as_of`, because news keeps arriving after the newest bar. A headline dated
-  after the newest bar was published after every move in the table, so it
-  cannot be what moved the price. Do not present it as the cause of a move.
+- Headline dates are calendar dates. A headline dated after the newest bar
+  was published after every move in the table, so it cannot be what moved the
+  price: do not present it as a cause.
 - General indicator conventions are allowed. Use the ones below so that every
   role reads a value the same way.
 
@@ -61,8 +59,8 @@ the user or carries its own connectors.
   turn use only that role's listed inputs.
 - Record how the roles ran in the draft's `[roles]` slot: `subagents` when
   every role that ran had its own context, `single` when none had, `mixed`
-  otherwise. A single context cannot fully un-see earlier turns, which is why
-  the report says how the roles ran.
+  otherwise. A single context cannot un-see earlier turns, so the report
+  says how the roles ran.
 
 ## Indicator conventions
 
@@ -73,15 +71,14 @@ the user or carries its own connectors.
 | `cci20` | Above +100 strong upside momentum or overbought, below -100 the reverse. |
 | `mfi14` | Above 80 overbought (heavy buying pressure), below 20 oversold (heavy selling pressure). |
 | `bb_pctb` | 0.5 is the middle band. Above 1 is over the upper band, below 0 is under the lower band. |
-| `adx14` | Below 20 a weak trend or none, above 25 a strong trend. It measures strength, not direction. |
+| `adx14` | Below 20 a weak trend or none, above 25 a strong trend. It measures strength, not direction. After a turn it still carries the old move, not the new one's strength. |
 | `macd`, `macd_signal`, `macd_hist` | MACD above its signal line (a positive histogram) is positive momentum, below is negative. A small histogram is a weak reading. |
 | `atr14`, `atr14_pct` | A typical daily range. The percent figure makes it comparable across stocks. |
 | `sma10_gap`, `sma50_gap`, `sma200_gap` | Price above the 10, 50 and 200-day averages is an uptrend at that horizon, below is a downtrend. |
-| `high52`, `low52` and their gaps | Measured from the highest and lowest daily close of the past year, not from intraday extremes. |
-| `vol_ratio` | The newest volume against the 20-day average. Above 1 is heavier than usual. In an unfinished session the newest volume is partial, so the ratio reads low. |
+| `high52`, `low52` and their gaps | Measured from the highest and lowest daily close of the past year, not from intraday extremes. An unfinished newest price counts as a close here. |
+| `vol_ratio` | Above 1 is heavier than usual. In an unfinished session the newest volume is partial, so the ratio reads low. Not for crypto: there the volume is a rolling 24-hour turnover. |
 
 The numbers in this table are for reasoning. Never type one into the draft.
-Write "below the oversold line", not the number.
 
 ## Stage 1: analyst team
 
@@ -91,7 +88,7 @@ report of about 150 to 300 words under the headings in the last column.
 | Role | Runs when | Task | Report headings |
 |---|---|---|---|
 | Market analyst | Always | Judge trend direction and strength from the average gaps, MACD, ADX and the 1, 5, 21 and 63-day returns. Judge momentum and overbought or oversold conditions from RSI, the stochastic K, D and J values and CCI. Judge volatility and mean-reversion pressure from Bollinger %B, ATR, the 21-day volatility and the distance from the 52-week high and low. Check whether volume and MFI confirm or contradict the price action. | Bullish signals. Bearish signals. Technical read for the next few trading days. |
-| Fundamentals analyst | The type is EQUITY and the sheet has statement facts. Skip this role when the statement facts are absent or the type is not EQUITY. | Decide whether the company looks cheap or expensive for its growth and profitability. Judge that only from the statement facts against each other (`pe_trailing`, `pe_forward` and `peg` against `rev_q_yoy`, `ni_q_yoy` and `margin_ttm`), not against remembered sector or market multiples. Flag balance-sheet and margin concerns from `debt`, `equity` and `debt_equity`, which is a percentage. Say how the statement facts support or undermine the recent price action. Every statement fact carries its own "as of" date. Say so when a date is old, or when two facts you compare carry different dates. A money figure names its currency, which is often not the currency of the price: never set figures in different currencies against each other. | Positives. Negatives. Fundamental read. |
+| Fundamentals analyst | The type is EQUITY and the sheet has statement facts. Skip this role when the statement facts are absent or the type is not EQUITY. | Decide whether the company looks cheap or expensive for its growth and profitability. Judge that only from the statement facts against each other (`pe_trailing`, `pe_forward` and `peg` against `rev_q_yoy`, `ni_q_yoy` and `margin_ttm`), not against remembered sector or market multiples. `pe_forward` and `peg` rest on analyst estimates: say so. Flag balance-sheet and margin concerns from `debt`, `equity` and `debt_equity`, which is a percentage. Say how the statement facts support or undermine the recent price action. Every statement fact carries its own "as of" date. Say so when a date is old, or when two facts you compare carry different dates. A money figure names its currency, which is often not the currency of the price: never set figures in different currencies against each other. | Positives. Negatives. Fundamental read. |
 | News analyst | The sheet has headlines | Sort the headlines into likely positive, negative and neutral price drivers. Name the single most price-relevant story. Say whether each driver is company-specific, sector-wide or macro, and how long its effect should last. Use only the listed headlines, which are titles with no article text. A headline about another company or the wider market counts only as a sector or macro driver, and say that it is one. Set aside any that have nothing to do with this company or its sector. When two headlines conflict, say so and do not settle it from memory. If no headline explains the largest move in the table (`move_max` on `move_max_date`), say that too. | News backdrop. Net effect over the next few trading days. |
 | Sentiment analyst | The sheet has headlines | Infer investor mood from headline tone and from sentiment-sensitive technicals: momentum, volume behaviour and where the price sits in its recent range. Classify the regime as euphoric, constructive, neutral, fearful or capitulatory, and say whether it should persist or mean-revert. | Sentiment regime. What it implies for near-term positioning. |
 
@@ -212,7 +209,9 @@ report through the slots below.
   `bb_upper`, `bb_lower`, `high52` or `low52`. The side is `bull` or `bear`:
   the case that the condition would support. The words say what has to
   happen at that price. Take the conditions from the facilitator's rationale
-  and the market analyst's report.
+  and the market analyst's report. A level must still be open: not already
+  met by the newest finished close. An average or a band moves each day:
+  prefer a dated price, or say that the level moves.
 - `[trader]`: the trader's action and size, for example `HOLD 0.0`.
 - `[manager]`: `approved` or `rejected`, then the fund manager's
   `final_action` and `final_size`.
@@ -242,14 +241,16 @@ Wording rules for every prose slot:
   also with "is", "was", "of" or "at" in between, only that fact's own
   reference is accepted. For any other fact, say "the price":
   "The price is {{sma50_gap|dir}} its medium-term average" is always accepted.
-  The same sentence with "The last price is" or "The last close is" is not.
+- A headline is its publisher's claim, not a fact: write "a headline
+  reports", above all about a named person.
 - No advice, certainty or personal wording. Phrases such as "you should",
   "price target", "will rise" and "your position" are refused.
-- When the session is unfinished or unknown, call the newest price the last
-  price, never the close.
+- When the session is unfinished or unknown, call the newest price "the
+  price" or cite `{{last|label}}`, never the close.
 - Quantity words such as "half", "double" and "twice" are arithmetic in
   disguise. The receipt counts them as not checked, and it counts "quarter"
-  and "third" in any sense. Avoid them.
+  and "third" in any sense. Avoid them. Fractions in words ("a fifth") are
+  not counted: never use one for a figure.
 - A number spelled out in words ("thirty", "a dozen") is a typed figure in
   disguise. Never write one. The receipt counts these too, and it counts
   "two" or "ten" in any sense.
@@ -259,7 +260,9 @@ Wording rules for every prose slot:
 
 Quote the script's sentence exactly as it was printed. Add the choices that
 `SKILL.md` lists for that stop code, if any. A stop message carries no
-disclosure block, no partial analysis and no figure from the data. When the
+disclosure block, no partial analysis and no figure from the data. If your
+host, not a script, stops your reply, say that no report was made and that
+the user can ask again in a new chat. When the
 run ends with no report and no open choice, remove the folder with the last
 command of Step 6.
 
@@ -268,19 +271,21 @@ command of Step 6.
 This is choice 3 of "When the code tool has no internet" in `SKILL.md`.
 
 - Before any charge: call the tool only if your host saves a tool's result as
-  a file that you can pass by path. If it does not, or you do not know, say
-  so and offer choices 1 and 2. Do not use this route for a listing in
+  a file that you can pass by path. If it does not, or you do not know, start
+  no charge: ask only whether the user has the saved result as a file, beside
+  the other choices `SKILL.md` names for the stop. Do not use this route for a listing in
   Australia or New Zealand: the saved result carries no exchange dates, and
   `brief.py` stops with `E_DATES`.
-- The tool's id is `yahoo-finance:get_historical_data`. Call it with `symbol`,
+- The tool's id is `yahoo-finance:get_historical_data`, on the Agensi
+  marketplace. If you have no such tool, say so. Call it with `symbol`,
   `range` `1y` and `interval` `1d`. It costs about $0.07, and the price is
   shown to the user for approval first.
 - In Step 2, pass the file that holds the tool's saved result, unchanged, in
   place of `DIR/bundle.json`. Add no `--symbol` and no `--currency`: the file
   names both. The sheet then has no headlines and no statement figures, and
   its flags say so.
-- Never retype price rows by hand into a file. If the tool's result is only
-  text in the conversation, say so and offer choices 1 and 2.
+- If the tool's result is only text in the conversation, say so and offer
+  the other choices.
 - Type rows only when the user explicitly asks, and then write directly above
   the report: "The price rows were typed by the assistant and not checked
   against the source."
@@ -306,8 +311,7 @@ This is choice 3 of "When the code tool has no internet" in `SKILL.md`.
 - Not guaranteed: that the sentence around a figure is right or names the
   right fact, that the desk chose the facts that matter, or that its view is
   any good.
-- Quantity words such as "half" and "double", and numbers spelled out in
-  words, are counted on the receipt and not checked.
+- Quantity words and numbers in words are counted, not checked.
 
 To check a saved report against its brief later, run
 `PY "DIR/render.py" --verify "DIR/brief.json" "DIR/report.md"`. It prints
@@ -319,11 +323,8 @@ short version.
 
 ### The page
 
-The page is the same report, drawn by `page.py` from the brief and the
-resolved report that `render.py` saved. It adds a price chart with the two
-averages and the levels, and meters for some indicators. The printed report is
-the answer. If the two ever disagree, trust the printed report and say so.
-Never paste the page's HTML into the chat as text.
+The page is the same report, drawn by `page.py`. The printed report is the
+answer: if the two ever disagree, trust it and say so.
 
 ### Several tickers
 

@@ -61,7 +61,8 @@ MAX_SKILL_MD_BYTES = 12000
 MAX_REFERENCE_BYTES = 20000
 
 _BASE_IMPORTS = frozenset({"sys", "json", "math", "re", "hashlib", "datetime", "html"})
-_NETWORK_IMPORTS = frozenset({"urllib.request", "urllib.parse", "urllib.error"})
+# `time` is for the one pause before the one new attempt after a rate limit.
+_NETWORK_IMPORTS = frozenset({"urllib.request", "urllib.parse", "urllib.error", "time"})
 ALLOWED_IMPORTS = {
     "get_data.py": _BASE_IMPORTS | _NETWORK_IMPORTS,
     "brief.py": _BASE_IMPORTS,
@@ -160,7 +161,14 @@ _FAIL_PHRASES = (
     "pip install", "curl", "sudo", "base64",
 )
 _URL = re.compile(r"[a-z][a-z0-9+.-]*://[^\s\"'<>)\]]+", re.IGNORECASE)
-# The one line a script's hash leaves out: its own stamp, in exactly this form.
+# A script's stamp line. Its hash reads a line of exactly this form as the one word SELF,
+# whatever stamp the line holds. The line is not left out: it keeps its place in the hash, so
+# a second, a moved or a missing stamp line changes it. Two things follow from the rule and
+# stand as they are (tests/skill_v2/test_portable.py holds both). A copy with the bare word
+# SELF in place of the line hashes as the stamped copy: it passes the preflight and then
+# stops with a NameError. And a line SELF = "000000000000" under the stamp line makes the
+# copy a development copy when it runs (it warns and works); the preflight refuses such a
+# copy of get_data.py, render.py or page.py.
 _STAMP_LINE = re.compile(rb'SELF = "[0-9a-f]{12}"')
 # An escape that names a character by its code or its name. Some agent hosts decode these
 # while they write a script out, which changes the file and fails its integrity check.
@@ -245,19 +253,20 @@ def _check_frontmatter(skill_dir: Path) -> None:
 # --- integrity stamps ------------------------------------------------------------------
 
 def script_hash(data: bytes) -> str:
-    """The contract's hash of a script: SHA-256 over its bytes without the stamp line, with
-    LF line endings and no trailing whitespace; the first 12 hex digits.
+    """The contract's hash of a script: SHA-256 over its bytes with LF line endings and no
+    trailing whitespace, each line that is exactly ``SELF = "<12 hex>"`` read as the one
+    word ``SELF``; the first 12 hex digits.
 
-    Only a line that is exactly ``SELF = "<12 hex>"`` is left out. Any other line counts,
-    whatever it starts with, and so does a byte-order mark: a file that holds either is an
-    altered file.
+    The stamp line keeps its place in the hash, so a second, a moved or a missing stamp
+    line changes it. Any other line counts as it is, whatever it starts with, and so does
+    a byte-order mark: a file that holds either is an altered file.
 
     This is the rule brief.py applies to itself and its siblings, and render.py and page.py
     apply to themselves. The four must agree, and the tests hold them to it.
     """
     text = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
     lines = [line.rstrip() for line in text.split(b"\n")]
-    kept = [line for line in lines if not _STAMP_LINE.fullmatch(line)]
+    kept = [b"SELF" if _STAMP_LINE.fullmatch(line) else line for line in lines]
     return hashlib.sha256(b"\n".join(kept).rstrip()).hexdigest()[:12]
 
 

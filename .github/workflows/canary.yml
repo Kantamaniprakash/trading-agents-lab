@@ -4,10 +4,13 @@ name: Data source canary
 # answer is put in one of four classes:
 #   ok       the data came and brief.py accepted it. A flag on the brief, such as
 #            prices_behind when the source has not published a finished session yet, is
-#            brief.py doing its job: the run is ok and the flags are shown
-#   refused  the source turned this network away, could not be reached, or answered with an
-#            error of its own. That is not a fault in the scripts, so it is a notice and
-#            the job passes
+#            brief.py doing its job: the run is ok and the flags are shown. So is a run
+#            whose headline or statement request failed: the data line says "failed".
+#            BTC-USD is a coin, and only a company is asked for statements: its data line
+#            says statements=absent every night, which is not a change in the source
+#   refused  the source turned this network away (a refusal, or a rate limit that outlasted
+#            the one new attempt), could not be reached, or answered with an error of its
+#            own. That is not a fault in the scripts, so it is a notice and the job passes
 #   stopped  brief.py stopped on the day's data with one of its own sentences, such as a
 #            gap in the dates. A warning; the job passes
 #   changed  the answer no longer has the form the scripts read. The job fails
@@ -47,7 +50,7 @@ jobs:
 
           SCRIPTS = os.path.join("skill", "trading-agents-desk", "scripts")
           SYMBOLS = ("NVDA", "SHEL.L", "BTC-USD")
-          REFUSED = ("E_REFUSED", "E_NO_ROUTE", "E_SERVER", "E_CERT")
+          REFUSED = ("E_REFUSED", "E_BUSY", "E_NO_ROUTE", "E_SERVER", "E_CERT")
           # E_NOT_FOUND counts as changed here: these three symbols have been listed for years.
           CHANGED = ("E_SHAPE", "E_NOT_FOUND", "E_INPUT")
           LEVEL = {"ok": "::notice", "refused": "::notice", "stopped": "::warning",

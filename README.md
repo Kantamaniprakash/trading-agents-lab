@@ -229,16 +229,17 @@ package.
 
 A run goes in this order:
 
-1. `get_data.py` downloads a year of daily prices, recent headlines and a few statement
-   figures from one host, `query1.finance.yahoo.com`. A price file works when there is no
-   network.
+1. `get_data.py` downloads a year of daily prices, recent headlines and, for a company, a
+   few statement figures from one host, `query1.finance.yahoo.com`. After a rate limit it
+   waits once and asks once more. A price file works when there is no network or the source
+   turns the download away.
 2. `brief.py` checks the data, stops with a fixed sentence when it cannot be used, computes
    the indicators with the same definitions as `tradinglab.features.indicators`, and prints a
    fact sheet of named facts with every data problem as a flag and a note. When the source
    has not published a finished session yet, the view ends at the last complete day and the
    report says so in its first line.
 3. The agent plays the twelve roles from that sheet and writes a draft that names facts, such
-   as `{{rsi14}}`. It never types a market figure.
+   as `{{rsi14}}`. It never types a market figure in digits.
 4. `render.py` sends back a draft that holds a typed digit, inserts every figure from the
    data, applies the desk's decision rules, and prints the report with a receipt. That
    Markdown report is the answer.
@@ -260,9 +261,9 @@ run when the two disagree, and a preflight checks every script file the run uses
 `python skill/build_skill.py` again after editing a script: it stamps the hashes and the
 known answers. A test fails while a stamp is stale, and no formatter may touch the scripts
 (they are excluded from `ruff format` and from the pre-commit hooks for that reason).
-CI runs the scripts on Linux, macOS and Windows with Python 3.9 and 3.13, and a nightly
-workflow asks the live data source for three symbols and fails only when the answer's format
-has changed.
+CI runs the scripts on Linux, macOS and Windows with Python 3.9, 3.13, 3.14 and 3.15, and a
+nightly workflow asks the live data source for three symbols and fails only when the answer's
+format has changed.
 
 Three limits are deliberate, and the skill states them to the user:
 

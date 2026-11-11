@@ -4,6 +4,8 @@ The page is run the way the skill runs it: as a separate process on two JSON fil
 are built here, in the shapes brief.py and render.py write (brief.v1 and report.v1), from a
 seeded generator. No other script is imported, no network is used and no number is real market
 data. The HTML is read back with the standard library's parser and compared with the inputs.
+One fixture runs render.py as a process too: the texts the page shares with the Markdown
+report are read from that report, not written down a second time here.
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 PAGE = HERE.parents[1] / "skill" / "trading-agents-desk" / "scripts" / "page.py"
+RENDER = PAGE.with_name("render.py")
 SOURCE = PAGE.read_bytes()
 
 ALLOWED_IMPORTS = {"sys", "json", "math", "re", "hashlib", "datetime", "html"}
@@ -39,6 +42,11 @@ E_SELF = "ERROR E_SELF this copy of page.py was altered; load the skill files ag
 END = datetime.date(2026, 11, 10)
 ROWS = 120
 DOT = chr(183)  # the middle dot the page puts between parts
+# The hyphen the page writes between two digits, so that a date never breaks across two
+# lines: as it is read back, and as it stands in the file.
+NB_HYPHEN, NB_REFERENCE = chr(8209), "&#8209;"
+CAPTION = ("%d daily %ss in %s, %s to %s. 50d and 200d: the 50-day and 200-day averages. "
+           "Dashed lines: the report's levels.")
 # The eight flags brief.py can set.
 FLAGS = ("close_filled", "prices_behind", "history_gap", "rows_dropped", "unfinished_session",
          "short_history", "statements_absent", "no_headlines")
@@ -192,6 +200,13 @@ def level_of(brief, key, side="bull", words="on a close above"):
             "gap_t": "%+.1f%%" % gap, "side": side, "words": words}
 
 
+def level_at(brief, price, label, side="bull", words="on a move above"):
+    """A hand-made level row at any price, in the shape render.py writes."""
+    gap = 100 * (price / brief["facts"]["last"]["v"] - 1)
+    return {"label": label, "price": price, "price_t": price_text(price),
+            "gap_t": "%+.1f%%" % gap, "side": side, "words": words}
+
+
 def make_report(brief, action="HOLD", size=0.0, levels=("prev_close", "sma50")):
     """A report.v1 document for the brief, every reference already resolved to text."""
     facts = brief["facts"]
@@ -336,8 +351,10 @@ class Node:
         return "".join(kid if isinstance(kid, str) else kid.raw() for kid in self.kids)
 
     def text(self):
-        """All the text below this node, with runs of white space made one space."""
-        return " ".join(self.raw().split())
+        """All the text below this node as the inputs hold it: runs of white space made one
+        space, and the page's non-breaking hyphens made plain again. raw() keeps them, and
+        the tests of the dates below read the file itself."""
+        return " ".join(self.raw().split()).replace(NB_HYPHEN, "-")
 
 
 class Tree(HTMLParser):
@@ -406,6 +423,16 @@ def assert_safe(page):
                    "<object", "<embed", "<form", "<a ", "<base", "srcset", "<!--"):
         assert needle not in low, needle
     assert "http" not in tree.root.one("style").text().lower()
+    # In the title and below the style sheet a hyphen between two digits is the
+    # non-breaking one, written as a character reference, and that reference stands nowhere
+    # else: Node.text() makes it plain again, so without this a page could hold either hyphen
+    # in the wrong place.
+    head, body = page.split("</style>", 1)
+    title = head.split("<title>", 1)[1].split("</title>", 1)[0]
+    for part in (title, body):
+        assert not re.search(r"\d-\d", part), re.search(r".{0,30}\d-\d.{0,30}", part)
+        assert not re.search(r"(?<!\d)&#8209;|&#8209;(?!\d)", part)
+    assert NB_REFERENCE not in head.split("<style>", 1)[1]
     for node in tree.root.walk():
         if node.tag == "#root":
             continue
@@ -529,7 +556,9 @@ def test_evidence_rows_equal_the_inputs(normal):
 
 def level_rows(root):
     rows = root.one("section", "cv").one("table").kids
-    assert [cell.text() for cell in rows[0].kids] == ["Level", "Price", "From last"]
+    # The third column says how far the price must move. It was headed "From last".
+    assert [cell.text() for cell in rows[0].kids] == ["Level", "Price", "To reach it"]
+    assert [cell.tag for cell in rows[0].kids] == ["th"] * 3
     return [(row.kids[0].one("b").text(), row.kids[0].one("small").text(),
              row.kids[1].text(), row.kids[2].text()) for row in rows[1:]]
 
@@ -553,8 +582,8 @@ def test_level_rows_ladder_and_chart_equal_the_inputs(normal):
     assert ends == sorted(["Close " + brief["facts"]["last"]["t"],
                            "50d " + brief["facts"]["sma50"]["t"],
                            "200d " + brief["facts"]["sma200"]["t"]])
-    assert chart.one("small").text().startswith(
-        "120 daily closes in USD, %s to %s." % (brief["series"]["date"][0], brief["as_of"]))
+    assert chart.one("small").text() == CAPTION % (
+        120, "close", "USD", brief["series"]["date"][0], brief["as_of"])
     # Three lines and the tint under the close, each with one point for each row.
     paths = chart.find("path")
     assert [p.attrs["class"] for p in paths] == ["ln", "ln", "ln", "fl"]
@@ -621,6 +650,284 @@ def test_other_pythons_write_the_same_bytes(tmp_path, normal, version):
     assert (other.code, other.raw, other.stdout) == (0, first.raw, first.stdout)
 
 
+# --- what the page shares with the Markdown report ------------------------------------------
+
+# A draft render.py accepts on a brief from make_brief: it names facts and types no figure.
+DRAFT = """[verdict] NEUTRAL
+[why] Neither case carries the day: {{adx14|label}}.
+[bull.claim] Momentum leaves room.
+[bull.evidence] rsi14, mfi14, pe_trailing
+[bull.also] Nothing else stands out.
+[bull.weak] No reversal shows yet.
+[bear.claim] The trend is weak.
+[bear.evidence] adx14, sma50_gap
+[bear.also] The medium average is {{sma50|gap}} away.
+[bear.weak] No lower price shows yet.
+[levels]
+sma50 | bull | while the price holds above it
+close.1 | bear | on a move below
+[trader] HOLD 0.0
+[manager] approved HOLD 0.0
+[risk] The trader proposed no trade. The manager approved it unchanged.
+[roles] single
+[skipped] none
+"""
+
+
+@pytest.fixture(scope="module")
+def through_render(tmp_path_factory):
+    """One brief taken through render.py and then page.py, both as processes: the brief, the
+    Markdown report, the resolved report and the parsed page."""
+    folder = tmp_path_factory.mktemp("render")
+    brief = make_brief(seed=41)
+    write(folder / "brief.json", brief)
+    (folder / "draft.txt").write_bytes(DRAFT.encode("ascii"))
+    done = subprocess.run(
+        [sys.executable, "-I", "-B", str(RENDER), str(folder / "brief.json"),
+         str(folder / "draft.txt"), str(folder / "report.md"), str(folder / "report.json")],
+        capture_output=True, timeout=60)
+    assert done.returncode == 0, (done.stdout, done.stderr)
+    markdown = (folder / "report.md").read_bytes().decode("ascii")
+    report = json.loads((folder / "report.json").read_bytes())
+    drawn = subprocess.run(
+        [sys.executable, "-I", "-B", str(PAGE), str(folder / "brief.json"),
+         str(folder / "report.json"), str(folder / "page.html")], capture_output=True, timeout=60)
+    result = Run(drawn, folder / "page.html")
+    return brief, markdown, report, result, good(result)
+
+
+def said_under_the_first_line(markdown):
+    """The sentence the Markdown report prints between its desk view line and its first
+    table: what the desk is, and how its only test ended."""
+    parts = markdown.split("\n\n")
+    assert parts[1].startswith("Desk view at the ") and parts[3].startswith("| The argument |")
+    assert re.fullmatch(r"[A-Z][A-Za-z ,.-]+\.", parts[2]), parts[2]
+    return parts[2]
+
+
+def test_the_header_carries_the_sentence_the_report_prints_under_its_first_line(through_render):
+    _, markdown, _, result, root = through_render
+    said = said_under_the_first_line(markdown)
+    # In the header band, in small type under the desk view line and above the four tiles.
+    header = root.one("header")
+    assert [kid.tag for kid in header.kids] == ["h2", "h1", "p", "small", "div"]
+    assert header.kids[3].raw() == said and header.kids[3].attrs == {}
+    assert result.page.count("</p><small>%s</small><div class=t>" % said) == 1
+    # Once on the page: the receipts hold the test record with its two figures, not this.
+    assert result.page.count(said) == 1 and markdown.count(said) == 1
+
+
+@pytest.mark.parametrize("session, source, flags", [
+    ("finished", "yahoo-chart", []), ("unfinished", "yahoo-chart", ["unfinished_session"]),
+    ("unknown", "price-file", ["statements_absent", "no_headlines"]),
+    ("finished", "yahoo-chart", ["prices_behind", "close_filled"])])
+def test_every_page_carries_that_sentence(tmp_path, through_render, session, source, flags):
+    said = said_under_the_first_line(through_render[1])
+    brief = make_brief(seed=42, session=session, flags=flags)
+    brief["source"] = source
+    for action, size in (("HOLD", 0.0), ("BUY", 0.5)):
+        root = good(run_page(tmp_path, brief, make_report(brief, action, size), action))
+        header = root.one("header")
+        assert [kid.tag for kid in header.kids] == ["h2", "h1", "p", "small", "div"]
+        assert header.kids[3].raw() == said
+
+
+def test_the_levels_are_headed_on_the_page_as_they_are_in_the_report(through_render):
+    brief, markdown, report, _, root = through_render
+    head = [line for line in markdown.split("\n") if line.startswith("| Level |")]
+    assert len(head) == 1
+    cells = [cell.strip() for cell in head[0].strip("|").split("|")]
+    # The page leaves the last column out: it says which case a level supports under the
+    # level's name.
+    shown = [cell.text() for cell in root.one("section", "cv").one("table").kids[0].kids]
+    assert shown == cells[:3] and cells[3] == "Would support"
+    assert level_rows(root) == expected_rows(report)
+    # The distances under that heading are the report's, sign and all.
+    rows = [[cell.strip() for cell in line.strip("|").split("|")]
+            for line in markdown.split("\n\n")[7].split("\n")[2:]]
+    assert [row[2] for row in rows] == [row[3] for row in level_rows(root)]
+    last = brief["facts"]["last"]["v"]
+    assert [row[2][0] for row in rows] == [
+        "+" if level["price"] > last else "-" for level in report["levels"]]
+
+
+# --- dates and hyphens ----------------------------------------------------------------------
+
+def test_esc_writes_the_hyphen_between_two_digits_as_the_non_breaking_one():
+    esc = load_script()["esc"]
+    assert esc("2026-11-10") == "2026&#8209;11&#8209;10"
+    assert esc("fetched 2026-11-11 04:06 UTC, as of 2026-11-10.") == (
+        "fetched 2026&#8209;11&#8209;11 04:06 UTC, as of 2026&#8209;11&#8209;10.")
+    # Every hyphen that stands between two digits, one after another.
+    assert esc("1-2-3") == "1&#8209;2&#8209;3" and esc("5-10%") == "5&#8209;10%"
+    assert esc(20261110) == "20261110" and esc(-5) == "-5"
+    # Any other hyphen is left as it is: a sign, a word, a ticker, a spaced dash.
+    for same in ("-0.82", "+1.25%", "-1.25%", "a -3.5% move", "50-day average", "BRK-B",
+                 "buy-and-hold", "5 - 3", "5 -3", "5- 3", "x-1", "1-x", "COVID-19", "A-1 rated",
+                 "-", "--", "3--4", "", "(-2)", "1,-2"):
+        assert esc(same) == same, same
+    # The text is made safe first. A character reference has digits of its own, and a hyphen
+    # beside one is not between two digits of the text.
+    assert esc('<a href="1-2">') == "&lt;a href=&quot;1&#8209;2&quot;&gt;"
+    assert esc("5'-3") == "5&#x27;-3" and esc("'-3") == "&#x27;-3" and esc("5-'") == "5-&#x27;"
+    assert esc("1&-2") == "1&amp;-2" and esc("1-&2") == "1-&amp;2"
+    assert esc("&#8209;") == "&amp;#8209;"
+    # The cut counts the characters of the input, so it never falls inside a reference, and a
+    # hyphen the cut leaves at the end has no digit after it.
+    assert esc("2026-11-10", 7) == "2026&#8209;11" and esc("2026-11-10", 8) == "2026&#8209;11-"
+    assert esc("2026-11-10", 5) == "2026-" and esc("1-2-3-4", 4) == "1&#8209;2-"
+    # A control character between the two becomes a space, and the hyphen stays plain.
+    assert esc("1\n-2") == "1 -2" and esc("1-\x002") == "1- 2"
+    for text in ("2026-11-10", "1-2", '"1-2"', "<1-2>"):
+        assert esc(text).isascii()
+
+
+def test_every_date_on_the_page_is_written_with_the_non_breaking_hyphen(tmp_path):
+    brief = make_brief(seed=31, flags=["close_filled"])
+    facts = brief["facts"]
+    report = make_report(brief, levels=("close.1", "sma50"))
+    # Texts as render.py resolves them: a statement figure with its date, a sentence with one.
+    report["bull"]["evidence"].append({
+        "label": facts["pe_trailing"]["label"],
+        "text": "%s (as of %s)" % (facts["pe_trailing"]["t"], facts["pe_trailing"]["as_of"])})
+    report["why"] = "The price stood at %s on %s." % (facts["last"]["t"], brief["as_of"])
+    report["risk"] = "The gap on %s was the risk. The manager agreed." % brief["series"][
+        "date"][-2]
+    result = run_page(tmp_path, brief, report)
+    root = good(result)
+    assert result.page.isascii()
+    chart, levels, receipts = (root.one("section", cls) for cls in ("s4", "cv", "rc"))
+    columns = {row.one("dt").text(): row.one("dd") for row in receipts.one("dl").kids}
+    dates = brief["series"]["date"]
+    dated = [node for node in chart.find("text", "lt") if "close on" in node.text()]
+    places = {
+        "the header line": (root.one("header").one("p"), [brief["as_of"], "2026-11-11"]),
+        "the why sentence": (root.one("p", "why"), [brief["as_of"]]),
+        "the notice strip": (root.one("aside"), ["2026-11-07"]),
+        "the chart caption": (chart.one("small"), [dates[0], dates[-1]]),
+        "a level label in the chart": (dated[0], [dates[-2]]),
+        "a level in the table": (levels.one("table").kids[1], [dates[-2]]),
+        "an evidence row": (root.one("section", "bull").one("ul", "ev"), ["2026-11-10"]),
+        "the risk review": (root.one("section", "rk"), [dates[-2]]),
+        "the statement tiles": (root.one("section", "fd"), ["2026-11-10", "2026-09-30"]),
+        "the headlines": (root.one("section", "hd"), [dates[-1], dates[-2]]),
+        "the receipt lines": (columns["The check"], [brief["as_of"]]),
+        "the data line and the notes": (columns["The data"], [brief["as_of"], "2026-11-07"]),
+    }
+    for where, (node, wanted) in places.items():
+        raw = node.raw()
+        for date in wanted:
+            assert date.replace("-", NB_HYPHEN) in raw, (where, date)
+        assert not re.search(r"\d-\d", raw), where
+        # Read back with the hyphens made plain, it is the date of the inputs.
+        assert all(date in node.text() for date in wanted), where
+    # In the file: a character reference, so the page is still ASCII, and no date anywhere
+    # with a plain hyphen. Nothing but the dates holds the reference on this page.
+    body = result.page.split("</style>", 1)[1]
+    assert not re.search(r"\d-\d", body) and NB_HYPHEN not in result.page
+    written = re.findall(r"\d{4}&#8209;\d\d&#8209;\d\d", body)
+    assert len(written) >= 20 and body.count(NB_REFERENCE) == 2 * len(written)
+    assert NB_REFERENCE not in result.page.split("</style>", 1)[0]
+    # The one line on stdout is not markup: it names nothing with a date here.
+    assert NB_REFERENCE not in result.stdout
+
+
+def test_a_hyphen_that_does_not_join_two_digits_stays_plain(tmp_path):
+    brief = make_brief(seed=32, symbol="BRK-B", flags=["rows_dropped"],
+                       notes=["A well-known gap - see the note - of 3 rows."])
+    brief["facts"]["ret5"].update(v=-1.25, t="-1.25%", sign="-")
+    brief["facts"]["bb_pctb"].update(v=-0.2, t="-0.20")
+    brief["headlines"][0]["title"] = "Chip-maker's well-known rival cuts prices - again"
+    report = make_report(brief, "SELL", 0.25, levels=("sma50", "prev_close"))
+    report["levels"][1]["gap_t"] = "-0.4%"
+    report["bear"]["also"] = "A -3.5% move on a 5-day view is not a trend."
+    result = run_page(tmp_path, brief, report)
+    root = good(result)
+    for kept in ("<title>BRK-B desk view</title>", "<h1>BRK-B <i>", ">-1.25%</b>", ">-0.20</b>",
+                 ">50-day average</b>", "Chip-maker&#x27;s well-known rival cuts prices - again",
+                 "<td>-0.4%</td>", "&#183; -0.4%</text>", "A -3.5% move on a 5-day view",
+                 "<b>-0.9%</b>", "buy-and-hold", "price-only", "Third-party text",
+                 "A well-known gap - see the note - of 3 rows.", ">-0.5</text>"):
+        assert kept in result.page, kept
+    assert result.stdout.startswith("PAGE ok BRK-B ")
+    assert root.one("title").raw() == "BRK-B desk view"
+    # The only non-breaking hyphens on this page are those of its dates.
+    body = result.page.split("</style>", 1)[1]
+    written = re.findall(r"\d{4}&#8209;\d\d&#8209;\d\d", body)
+    assert written and body.count(NB_REFERENCE) == 2 * len(written)
+
+
+def test_a_hyphen_between_digits_in_the_title_or_beside_markup_keeps_the_page_whole(tmp_path):
+    brief = make_brief(seed=33, symbol="T1-2")
+    brief["name"] = 'Class 1-2 "A" <b>3-4</b> & 5-6'
+    brief["headlines"][0]["title"] = "5'-6\" tall, 7-'8, &9-0; <1-2> </title> 3-4"
+    report = make_report(brief)
+    report["levels"][0].update(label='x" y=1-2 onload="3-4', price_t="1-2-3-4-5-6-7-8",
+                               gap_t="-1-2%")
+    result = run_page(tmp_path, brief, report)
+    # Well formed, ASCII, and only the page's own tags and attributes.
+    root = good(result)
+    assert result.page.count("<title>") == result.page.count("</title>") == 1
+    assert "<title>T1&#8209;2 desk view</title>" in result.page
+    assert root.one("title").raw() == "T1%s2 desk view" % NB_HYPHEN
+    assert root.one("title").text() == "T1-2 desk view"
+    assert root.one("h1").text() == "T1-2 " + brief["name"]
+    assert "Class 1&#8209;2 &quot;A&quot; &lt;b&gt;3&#8209;4&lt;/b&gt; &amp; 5&#8209;6" \
+        in result.page
+    assert root.one("section", "hd").one("ul").kids[0].kids[0].replace(NB_HYPHEN, "-") \
+        == brief["headlines"][0]["title"]
+    assert "5&#x27;-6&quot; tall, 7-&#x27;8, &amp;9&#8209;0; &lt;1&#8209;2&gt;" in result.page
+    # The line on stdout is not markup: it names the symbol as it was given.
+    assert result.stdout.startswith("PAGE ok T1-2 ")
+    # No text of the inputs is written into an attribute, so no attribute holds the hyphen
+    # in either form, and no quote of an input ends one.
+    for node in root.walk():
+        for name, value in node.attrs.items():
+            assert NB_HYPHEN not in value and "8209" not in value, (node.tag, name)
+            assert "onload" not in name and "1-2" not in value
+    # Every reference in the file is whole: a cut falls on a character of the input.
+    assert "&#8209" not in result.page.replace(NB_REFERENCE, "")
+    row = level_rows(root)[0]
+    assert (row[0], row[2], row[3]) == ('x" y=1-2 onload="3-4', "1-2-3-4-5-6-7-8", "-1-2%")
+    assert "<td>1&#8209;2&#8209;3&#8209;4&#8209;5&#8209;6&#8209;7&#8209;8</td>" in result.page
+    assert "<td>-1&#8209;2%</td>" in result.page
+    # In the drawings the price is cut to 13 and to 12 characters: the hyphen the second cut
+    # leaves at the end has no digit after it and stays plain.
+    chart = [node.raw() for node in root.one("section", "s4").find("text", "lt")]
+    assert "1-2-3-4-5-6-7".replace("-", NB_HYPHEN) + " " in [x[:14] for x in chart]
+    ladder = root.one("svg", "ld").find("text")[0].raw()
+    assert ladder.startswith("1-2-3-4-5-6".replace("-", NB_HYPHEN) + "- " + DOT)
+
+
+def css_rules(sheet):
+    """The declarations of each selector of a style sheet, outside its phone block."""
+    rules = {}
+    for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", sheet.split("@media", 1)[0]):
+        for selector in selectors.split(","):
+            rules.setdefault(selector.strip(), []).extend(x for x in body.split(";") if x)
+    return rules
+
+
+def test_the_returns_under_the_meters_do_not_wrap(normal):
+    brief, _, _, root = normal
+    sheet = root.one("style").raw()
+    # The page lets any long word break (overflow-wrap:anywhere on the body), and a return
+    # stands in a narrow column: "-12.34%" used to break after its sign or inside its number.
+    assert "overflow-wrap:anywhere" in css_rules(sheet)["body"]
+    assert "white-space:nowrap" in css_rules(sheet)[".in dd"]
+    phone = sheet.split("@media", 1)[1]
+    assert "white-space" not in phone and ".in dd" not in phone
+    # The rule reaches each return, and nothing else on the page: the returns are the dd
+    # elements of the card with the class "in", and the only ones there.
+    card = root.one("section", "in")
+    cells = card.find("dd")
+    assert [cell.text() for cell in cells] == [
+        brief["facts"]["ret%d" % days]["t"] for days in (1, 5, 21, 63)]
+    assert all(cell.parent.parent.parent is card for cell in cells)
+    assert "in" in card.attrs["class"].split() and len(root.find("section", "in")) == 1
+    assert all(not {"class", "style"} & set(cell.attrs) for cell in cells)
+
+
 # --- outcomes, sessions, flags and missing parts --------------------------------------------
 
 def skeleton(node):
@@ -661,7 +968,8 @@ def test_a_session_that_is_not_finished_has_a_last_price_not_a_close(tmp_path, s
         "fetched %s" % (brief["as_of"], session, DOT, last, DOT, brief["fetched_at"])
     assert header.one("div", "t").kids[2].one("h2").text() == "Last price"
     chart = root.one("section", "s4")
-    assert chart.one("small").text().startswith("120 daily prices in USD")
+    assert chart.one("small").text() == CAPTION % (
+        120, "price", "USD", brief["series"]["date"][0], brief["as_of"])
     assert "Price " + last in [node.text() for node in chart.find("text", "el")]
     assert root.one("svg", "ld").find("text")[-1].text() == "Last price " + last
     # The only "close" left on the page is in the report's own words and the labels of facts.
@@ -841,6 +1149,22 @@ def percent(value):
     return float(value[:-1])
 
 
+def level_offsets(count):
+    """Where the chart's level labels stand against their lines, from the highest price down:
+    the top one above its line, the bottom one below it, any other on its line. One level
+    alone is on its line."""
+    if count < 2:
+        return [4] * count
+    return [-8] + [4] * (count - 2) + [16]
+
+
+def axis_step(size):
+    """The step of the price axis for drawn prices that span ``size``: the smallest of 1, 2,
+    2.5 and 5 times a power of ten that crosses them in five steps or fewer."""
+    family = sorted(m * 10.0 ** k for k in range(-12, 13) for m in (1, 2, 2.5, 5))
+    return min(step for step in family if size / step <= 5)
+
+
 def check_drawings(root, report):
     """Every level is in the table, on the ladder and in the chart, at a place on the page."""
     assert level_rows(root) == expected_rows(report)
@@ -856,11 +1180,15 @@ def check_drawings(root, report):
     chart = root.one("section", "s4")
     lines = chart.find("line", "lv")
     assert len(lines) == len(report["levels"])
-    spots = sorted(percent(node.attrs["y"]) for node in chart.find("text", "lt"))
     for line in lines:
         assert 4.9 <= percent(line.attrs["y1"]) <= 88.1
-    # Level labels keep a clear distance from each other.
-    assert all(b - a >= 5.99 for a, b in zip(spots, spots[1:]))
+    # Each level label is drawn at its own line, from the highest price down. A label used
+    # to be pushed down to keep its distance from the one above, and so came to stand on a
+    # neighbour's line.
+    labels = chart.find("text", "lt")
+    assert [label.attrs["y"] for label in labels] == [line.attrs["y1"] for line in lines]
+    assert [int(label.attrs["dy"]) for label in labels] == level_offsets(len(labels))
+    # The labels at the lines' ends still keep a clear distance from each other.
     ends = sorted(percent(node.attrs["y"]) for node in chart.find("text", "el"))
     assert all(b - a >= 5.99 for a, b in zip(ends, ends[1:]))
 
@@ -897,6 +1225,17 @@ def check_geometry(brief, report, root):
 
     for value, y in ticks:
         assert abs(y_of(value) - y) <= 0.02, ticks
+    # Round steps around everything that is drawn: no more lines than the prices need, and
+    # the step is 1, 2, 2.5 or 5 times a power of ten.
+    drawn = [level["price"] for level in report["levels"]]
+    for key in LINE_COLOURS.values():
+        drawn += [v for v in series[key] if v is not None]
+    assert low <= min(drawn) and max(drawn) <= high
+    step = (high - low) / (len(ticks) - 1)
+    assert all(abs(b[0] - a[0] - step) <= 1e-9 * high for a, b in zip(ticks, ticks[1:]))
+    assert min(drawn) - low < step * (1 + 1e-9) and high - max(drawn) < step * (1 + 1e-9)
+    if max(drawn) > min(drawn):
+        assert abs(step / axis_step(max(drawn) - min(drawn)) - 1) <= 1e-9, (step, ticks)
 
     # The lines: one point for each row that has a value, at that row and at that value.
     box = [node for node in chart.find("svg") if "viewbox" in node.attrs]
@@ -937,9 +1276,10 @@ def check_geometry(brief, report, root):
         assert dates[row - 1][5:7] != dates[row][5:7], (dates[row - 1], dates[row])
 
     # A level: a dashed line across the plot at its price. Its label starts where the line
-    # starts, so no dash shows before the price, where it would read as a minus sign.
-    lines = sorted(chart.find("line", "lv"), key=lambda line: percent(line.attrs["y1"]))
-    labels = sorted(chart.find("text", "lt"), key=lambda node: percent(node.attrs["y"]))
+    # starts, so no dash shows before the price, where it would read as a minus sign. The
+    # lines and the labels come in the same order, from the highest price down, and each
+    # label names the level whose line it stands at.
+    lines, labels = chart.find("line", "lv"), chart.find("text", "lt")
     levels = sorted(report["levels"], key=lambda level: -level["price"])
     assert len(lines) == len(labels) == len(levels)
     for line, label, level in zip(lines, labels, levels):
@@ -947,11 +1287,11 @@ def check_geometry(brief, report, root):
         assert line.attrs["y1"] == line.attrs["y2"]
         assert abs(percent(line.attrs["y1"]) - y_of(level["price"])) <= 0.02
         assert label.attrs["x"] == "0", "a level label must start where its line starts"
-        assert label.text().startswith(level["price_t"])
-        # A label is on its line, or below it when the label above needed the room.
-        assert percent(label.attrs["y"]) >= percent(line.attrs["y1"]) - 0.001
-    if labels:
-        assert labels[0].attrs["y"] == lines[0].attrs["y1"]
+        assert label.text() == "%s %s %s" % (
+            " ".join(level["price_t"][:13].split()), DOT, " ".join(level["label"][:44].split()))
+        assert label.attrs["y"] == line.attrs["y1"], "a level label must stand at its own line"
+    # Above the line for the highest level, below it for the lowest, on it otherwise.
+    assert [int(label.attrs["dy"]) for label in labels] == level_offsets(len(levels))
 
     # The ladder: every level and the last price at its place between the lowest and the
     # highest of them, left to right in price order.
@@ -1006,6 +1346,163 @@ def test_one_to_three_levels(tmp_path, name):
     check_geometry(brief, report, root)
     if "equal" in name:
         assert level_rows(root)[0][3] == "+0.0%"
+
+
+# Levels as fractions of the last price, in the order the report names them, and where each
+# label must stand against its line: -8 is above the line, 16 below it, 4 on it.
+LABEL_PLACES = {
+    "one above the price": ((1.02,), {"A": 4}),
+    "one below the price": ((0.97,), {"A": 4}),
+    "two": ((1.02, 0.97), {"A": -8, "B": 16}),
+    "two, the lower one named first": ((0.97, 1.02), {"B": -8, "A": 16}),
+    "two a hair apart": ((1.02, 1.018), {"A": -8, "B": 16}),
+    "three": ((1.0, 1.03, 0.96), {"B": -8, "A": 4, "C": 16}),
+    "three a hair apart": ((1.02, 1.018, 1.016), {"A": -8, "B": 4, "C": 16}),
+    # What went wrong before: B was pushed down to keep its distance from A, onto C's line.
+    "two a hair apart and one a label's height below": (
+        (1.02, 1.018, 0.985), {"A": -8, "B": 4, "C": 16}),
+    "the upper two a hair apart, named last": ((0.9, 1.0502, 1.05), {"B": -8, "C": 4, "A": 16}),
+}
+
+
+@pytest.mark.parametrize("name", list(LABEL_PLACES))
+def test_each_level_label_is_drawn_at_its_own_line(tmp_path, name):
+    parts, places = LABEL_PLACES[name]
+    brief = make_brief(seed=26)
+    last = brief["facts"]["last"]["v"]
+    levels = [level_at(brief, last * part, "Level " + "ABC"[i]) for i, part in enumerate(parts)]
+    report = make_report(brief, levels=levels)
+    root = good(run_page(tmp_path, brief, report))
+    chart = root.one("section", "s4")
+    # Each line by the price it is drawn at; the prices here are far enough apart for that.
+    grid = [node for node in chart.find("text") if node.attrs.get("text-anchor") == "end"]
+    (low, y_low), (high, y_high) = [(float(node.text()), percent(node.attrs["y"]))
+                                    for node in (grid[0], grid[-1])]
+    lines = {}
+    for level in levels:
+        y = y_low + (level["price"] - low) * (y_high - y_low) / (high - low)
+        near = [line.attrs["y1"] for line in chart.find("line", "lv")
+                if abs(percent(line.attrs["y1"]) - y) <= 0.011]
+        assert len(near) == 1, (level["label"], near)
+        lines[level["label"][-1]] = near[0]
+    assert len(set(lines.values())) == len(levels), lines
+    # A label, found by the name it shows, stands at the line of its own level and at no
+    # other, however near the next one is.
+    labels = {node.text()[-1]: node for node in chart.find("text", "lt")}
+    assert sorted(labels) == sorted(lines)
+    for letter, label in labels.items():
+        assert label.attrs["y"] == lines[letter], (letter, label.attrs["y"], lines)
+        assert label.text() == "%s %s Level %s" % (
+            levels["ABC".index(letter)]["price_t"], DOT, letter)
+    assert {letter: int(label.attrs["dy"]) for letter, label in labels.items()} == places
+    # From the highest price down: above its line, on it, below it.
+    order = [node.text()[-1] for node in chart.find("text", "lt")]
+    assert order == sorted(order, key=lambda letter: -levels["ABC".index(letter)]["price"])
+    assert [places[letter] for letter in order] == level_offsets(len(levels))
+    check_drawings(root, report)
+    check_geometry(brief, report, root)
+
+
+@pytest.mark.parametrize("count", [0, 4, 5, 6, 9])
+def test_a_hand_made_report_with_no_level_or_with_more_than_three_still_draws(tmp_path, count):
+    # render.py writes one to three levels. A report made by hand may hold any number: the
+    # page draws them all, the ones between the highest and the lowest on their lines.
+    brief = make_brief(seed=27)
+    last = brief["facts"]["last"]["v"]
+    levels = [level_at(brief, last * (1.06 - 0.02 * i), "Level %d" % i, "bear" if i % 2 else "bull")
+              for i in range(count)]
+    report = make_report(brief, levels=levels)
+    result = run_page(tmp_path, brief, report)
+    root = good(result)
+    check_drawings(root, report)
+    check_geometry(brief, report, root)
+    labels = root.one("section", "s4").find("text", "lt")
+    assert [int(label.attrs["dy"]) for label in labels] == (
+        [-8] + [4] * (count - 2) + [16] if count else [])
+    assert len(level_rows(root)) == count
+
+
+def test_the_200_day_line_starts_where_the_history_allows(tmp_path):
+    # A one-year download has about 250 rows, and the 200-day average exists from row 200
+    # on, so in a chart of the newest 120 rows its line starts part of the way across. That
+    # is how the page is meant to draw it: nothing is made up for the rows before.
+    brief = make_brief(seed=28, history=140)
+    series = brief["series"]
+    first = min(i for i, value in enumerate(series["sma200"]) if value is not None)
+    assert first == 59 and series["sma200"][-1] is not None and None not in series["sma50"]
+    report = make_report(brief)
+    root = good(run_page(tmp_path, brief, report))
+    check_geometry(brief, report, root)
+    chart = root.one("section", "s4")
+    line = [path for path in chart.find("path", "ln") if path.attrs["stroke"] == "#1baf7a"][0]
+    points = line.attrs["d"][1:].split("L")
+    assert len(points) == ROWS - first and points[0].startswith("%d," % first)
+    assert points[-1].startswith("%d," % (ROWS - 1))
+    assert "200d " + brief["facts"]["sma200"]["t"] in [n.text() for n in chart.find("text", "el")]
+
+
+def spanning(low, high, seed=29):
+    """A brief whose drawn prices span exactly ``low`` to ``high``: a close that climbs from
+    the one to the other, no averages, and one level between them."""
+    brief = make_brief(seed=seed)
+    close = [low + (high - low) * i / (ROWS - 1) for i in range(ROWS)]
+    close[0], close[-1] = low, high
+    brief["series"].update(close=close, sma50=[None] * ROWS, sma200=[None] * ROWS)
+    brief["facts"]["last"] = price_fact(high, "last close")
+    return brief, make_report(brief, levels=[level_at(brief, (low + high) / 2, "Level A")])
+
+
+AXES = [
+    # lowest and highest drawn price, the step, the numbers on the axis
+    (100.2, 104.6, 1, ["100", "101", "102", "103", "104", "105"]),
+    (100.5, 109.5, 2, ["100", "102", "104", "106", "108", "110"]),
+    # Steps of 2.5: with 1, 2, 5 and 10 alone this axis had the four lines of the next row.
+    (100.5, 111.5, 2.5, ["100", "102.5", "105", "107.5", "110", "112.5"]),
+    (100.5, 114.5, 5, ["100", "105", "110", "115"]),
+    (100.5, 139.5, 10, ["100", "110", "120", "130", "140"]),
+    (1000.0, 1120.0, 25, ["1000", "1025", "1050", "1075", "1100", "1125"]),
+    (61000.0, 73000.0, 2500, ["60000", "62500", "65000", "67500", "70000", "72500", "75000"]),
+    (0.0101, 0.0113, 0.00025,
+     ["0.01", "0.01025", "0.0105", "0.01075", "0.011", "0.01125", "0.0115"]),
+    (0.61, 0.73, 0.025, ["0.6", "0.625", "0.65", "0.675", "0.7", "0.725", "0.75"]),
+]
+
+
+@pytest.mark.parametrize("low, high, step, numbers", AXES, ids=[str(row[2]) for row in AXES])
+def test_the_price_axis_steps_by_1_2_2_5_or_5_times_a_power_of_ten(tmp_path, low, high, step,
+                                                                   numbers):
+    brief, report = spanning(low, high)
+    result = run_page(tmp_path, brief, report)
+    root = good(result)
+    chart = root.one("section", "s4")
+    axis = [n.text() for n in chart.find("text") if n.attrs.get("text-anchor") == "end"]
+    assert axis == numbers
+    assert abs(axis_step(high - low) / step - 1) < 1e-9
+    values = [float(label) for label in axis]
+    assert all(abs(b - a - step) < 1e-9 * step for a, b in zip(values, values[1:]))
+    # The axis starts and ends on a step, around the drawn prices and no further.
+    assert values[0] <= low < values[1] and values[-2] < high <= values[-1]
+    check_geometry(brief, report, root)
+    # The room at the left grows with the longest number: a step of 2.5 adds a decimal.
+    longest = max(len(label) for label in axis)
+    assert re.fullmatch(r"padding:0 \d+px 22px %dpx" % int(12 + 6.4 * longest),
+                        chart.one("div", "ch").attrs["style"])
+
+
+def test_the_axis_step_is_of_that_family_for_any_series(tmp_path):
+    seen = set()
+    for seed, start in enumerate((0.0007, 0.03, 0.9, 4.0, 17.0, 150.0, 3600.0, 70000.0, 2.2e6),
+                                 start=50):
+        brief = make_brief(seed=seed, start=start)
+        report = make_report(brief, levels=("high52", "low52"))
+        root = good(run_page(tmp_path, brief, report, "seed%d" % seed))
+        check_geometry(brief, report, root)
+        axis = [float(n.text()) for n in root.one("section", "s4").find("text")
+                if n.attrs.get("text-anchor") == "end"]
+        assert 2 <= len(axis) <= 8
+        step = axis[1] - axis[0]
+        seen.add(round(step / 10 ** math.floor(math.log10(step) + 1e-9), 6))
+    assert seen <= {1.0, 2.0, 2.5, 5.0} and len(seen) >= 2, seen
 
 
 @pytest.mark.parametrize("start, sample", [(0.0000083, "0.00000"), (0.0042, "0.00"),
@@ -1314,12 +1811,13 @@ def test_awkward_values_give_a_page_or_one_stop_line(tmp_path, capsys):
 # --- integrity -------------------------------------------------------------------------------
 
 def contract_hash(data):
-    """CONTRACTS.md section 1: SHA-256 over the bytes without the one stamp line
-    SELF = "<12 hex>", LF line endings, trailing whitespace stripped; the first 12 hex
-    digits. No other line is left out, whatever it starts with."""
+    """CONTRACTS.md section 1: SHA-256 over the bytes with LF line endings and trailing
+    whitespace stripped, each line that is exactly SELF = "<12 hex>" read as the one word
+    SELF; the first 12 hex digits. Every other line counts as it is, whatever it starts
+    with."""
     text = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    kept = [line.rstrip() for line in text.split(b"\n")
-            if not re.fullmatch(rb'SELF = "[0-9a-f]{12}"', line.rstrip())]
+    kept = [re.sub(rb'^SELF = "[0-9a-f]{12}"$', b"SELF", line.rstrip())
+            for line in text.split(b"\n")]
     return hashlib.sha256(b"\n".join(kept).rstrip()).hexdigest()[:12]
 
 
@@ -1364,6 +1862,9 @@ def test_an_unstamped_copy_says_so_and_runs(tmp_path, normal):
 
 def test_an_altered_copy_is_refused(tmp_path, normal):
     stamped = stamped_source()
+    stamp = re.search(rb'(?m)^SELF = "[0-9a-f]{12}"\n', stamped).group()
+    version, after = b'VERSION = "2.0.0"\n', b'SWING = ("oversold", "overbought")\n'
+    assert stamped.count(version + stamp + after) == 1
     rng = random.Random(15)
     letters = [m.start() for m in re.finditer(rb"[a-z](?=[a-z])", stamped)
                if b"\nCSS = " in stamped[:m.start()] and b'}"""' in stamped[m.start():]]
@@ -1372,12 +1873,21 @@ def test_an_altered_copy_is_refused(tmp_path, normal):
                "a wrong stamp": re.sub(rb'(?m)^SELF = "[0-9a-f]{12}"$',
                                        b'SELF = "0123456789ab"', SOURCE),
                "an added line": stamped + b"# one more line\n",
-               # Only the stamp line itself is outside the hash, not any line that starts
-               # like it: code on such a line used to pass.
+               # Only the stamp line itself is read as the word SELF, not any line that
+               # starts like it: code on such a line used to pass.
                "code on a line that starts like the stamp": stamped.replace(
                    b"\nSELF = ", b'\nSELF = print("added")\nSELF = ', 1),
                "a second stamp line with a comment": stamped.replace(
                    b"\nSELF = ", b'\nSELF = "000000000000"  # x\nSELF = ', 1),
+               # The stamp line keeps its place in the hash. It used to be left out of it,
+               # so a second stamp line above the real one, the same line twice and the
+               # stamp line in another place all hashed as the untouched copy and drew.
+               "a second stamp line above the stamp": stamped.replace(
+                   stamp, b'SELF = "0123456789ab"\n' + stamp),
+               "the stamp line twice": stamped.replace(stamp, stamp + stamp),
+               "the stamp line again at the end": stamped + stamp,
+               "the stamp line one line up": stamped.replace(version + stamp, stamp + version),
+               "the stamp line one line down": stamped.replace(stamp + after, after + stamp),
                "a byte-order mark": b"\xef\xbb\xbf" + stamped,
                "a no-break space in a text": stamped.replace(
                    b"Trading Agents Desk", "Trading\u00a0Agents Desk".encode("utf-8"), 1)}
@@ -1392,6 +1902,19 @@ def test_an_altered_copy_is_refused(tmp_path, normal):
         printed = "added\n" if name.startswith("code on a line") else ""
         assert (code, out, err) == (3, printed, E_SELF + "\n"), name
         assert not (folder / "p.html").exists(), name
+
+
+def test_a_copy_without_its_stamp_line_draws_nothing(tmp_path, normal):
+    # A missing stamp line changes the hash, and the preflight names such a copy (see
+    # test_portable.py). Run on its own, the copy has no stamp to compare its hash with:
+    # what is held here is that it draws no page and ends with one line, not a traceback.
+    stamped = stamped_source()
+    gone = re.sub(rb'(?m)^SELF = "[0-9a-f]{12}"\n', b"", stamped)
+    assert len(gone) == len(stamped) - 22 and contract_hash(gone) != contract_hash(stamped)
+    code, out, err, folder = run_copy(tmp_path, "no-stamp", gone, normal)
+    assert code != 0 and out == "", (code, out)
+    assert len(err.splitlines()) == 1 and "Traceback" not in err, err
+    assert not (folder / "p.html").exists()
 
 
 # --- the source ------------------------------------------------------------------------------
