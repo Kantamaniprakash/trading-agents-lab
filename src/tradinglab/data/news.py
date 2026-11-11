@@ -23,16 +23,26 @@ def _item_date(item: dict, content: dict) -> str:
     return ""
 
 
+def _clean(text: str, limit: int) -> str:
+    """Collapse all whitespace to single spaces and cap the length.
+
+    Headlines are third-party text that ends up inside an LLM prompt. Keeping
+    each one on a single short line means a headline can never start a new
+    line and so can never pose as a section of the snapshot.
+    """
+    return " ".join(text.split())[:limit]
+
+
 def _item_publisher(item: dict, content: dict) -> str:
     """Extract the publisher name from either yfinance news schema."""
     publisher = item.get("publisher") or content.get("publisher")
     if isinstance(publisher, str) and publisher:
-        return publisher
+        return _clean(publisher, 60)
     provider = content.get("provider") or item.get("provider")
     if isinstance(provider, dict):
         name = provider.get("displayName") or provider.get("name")
         if isinstance(name, str):
-            return name
+            return _clean(name, 60)
     return ""
 
 
@@ -65,7 +75,7 @@ def fetch_current_news(ticker: str, limit: int = 8) -> list[dict]:
             continue
         headlines.append(
             {
-                "title": title.strip(),
+                "title": _clean(title, 200),
                 "publisher": _item_publisher(item, content),
                 "date": _item_date(item, content),
             }

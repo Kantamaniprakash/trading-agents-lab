@@ -115,7 +115,7 @@ With [uv](https://docs.astral.sh/uv/) (reproducible — installs the exact locke
 
 ```bash
 uv sync --locked
-uv run pytest tests/ -q             # 62 tests, incl. no-lookahead perturbation tests
+uv run pytest tests/ -q             # incl. no-lookahead perturbation tests
 
 uv run python -m tradinglab.cli download   # 10 tickers, 2015 → today (cached parquet)
 uv run python -m tradinglab.cli baselines  # the paper's 5 rule strategies, full history
@@ -155,6 +155,88 @@ token/cost summary after every run; repeated runs hit the disk cache and cost no
 knowledge cutoff, or `--anonymize`.** Backtesting an LLM on dates it was trained through
 measures memory, not skill — this is the paper's central flaw.
 
+### One ticker, right now
+
+Two commands cover the "what does the desk think of this stock today?" case without a
+backtest window (`pip install` also puts a `tradinglab` command on the path, equivalent
+to `python -m tradinglab.cli`):
+
+```bash
+# No API key: print exactly what the agents would see (prices, indicators, returns,
+# current fundamentals + headlines), with data-quality notes. Add --json for one document.
+python -m tradinglab.cli snapshot --ticker NVDA
+
+# Needs ANTHROPIC_API_KEY: run the full desk once on that snapshot (~$0.20–0.50).
+python -m tradinglab.cli desk --ticker NVDA
+```
+
+The rule on this path is that a data problem is never analysed silently:
+
+- **Prices are downloaded fresh** on every snapshot (a download under 15 minutes old is
+  reused, unless it is already known to be missing the newest session). If Yahoo returns
+  nothing, the previous download is shown and flagged `prices_behind`. Desk downloads
+  live in their own cache folder, so an intraday bar can never reach a backtest through
+  a shared price file.
+- **An unfinished session is labelled as one.** Whether the newest bar is final is
+  decided on the exchange's own clock (Tokyo, crypto and US half-days included), and
+  Yahoo's calendar is cross-checked against its own last-trade time, because the calendar
+  has been seen an hour early with trades still printing. When the answer cannot be
+  established it is reported as unknown, not assumed to be a close. One limit is known:
+  where Yahoo's calendar is an hour early, a bar can be called final while the session
+  still has most of an hour to run. That lasts up to 15 minutes when the quote feed is
+  delayed, and, for a thinly traded symbol, for as long as its latest trade sits in the
+  15 minutes after the calendar's close.
+- **Gaps are named.** An old bar (noted after 5 days, called stale after 12, which is
+  longer than any scheduled exchange closure), a non-dollar price currency (pence and
+  cents spelled out), statements reported in a different currency from the share price,
+  and fundamentals that Yahoo returned empty or incomplete (its usual answer when
+  rate-limiting) each produce a note. The notes that change how the numbers must be read also go at the top
+  of the agents' prompt.
+- **An empty price download says why.** Yahoo answers a rate limit and an unknown symbol
+  with the same empty frame; the error tells them apart when Yahoo said which it was,
+  since one calls for a retry and the other does not. Anything else (a timeout, a 5xx)
+  is retried and then falls back to the previous download.
+- **Past dates never receive fundamentals or news.** Yahoo serves current values only,
+  so they would leak the future. `snapshot --date 2026-03-09 --anonymize` shows the
+  masked block a backtest decision day is given today (the published AAPL run predates
+  the price rebasing, so its prompts differed).
+- **`desk` will not spend API credit on bad data.** It exits before any LLM call when
+  the snapshot is stale, prices are behind, or live data was asked for and none came
+  back; `--allow-degraded` overrides those. Every command that saves something (`desk`,
+  `agents`, `probe`, `baselines`, `train-ml`, and `download` for its cache) first proves
+  it can write it. It saves a transcript and a JSON record under
+  `results/desk/`. A repeat is only free when prices, fundamentals and headlines all come
+  back unchanged, which during market hours they never do.
+
+## Use it from your coding agent (skill)
+
+[`skill/trading-agents-desk/`](skill/trading-agents-desk/) packages the desk as an
+[agent skill](https://agentskills.io): a `SKILL.md` plus role briefs that Claude Code,
+Codex, Cursor and similar agents can load. The agent runs `snapshot` for the evidence and
+then plays the twelve roles itself, so **no Anthropic API key is needed** — the host
+agent's own model does the reasoning. Ask it to "analyze NVDA" and you get the simulated
+desk's sized BUY / SELL / HOLD view, the strongest argument on each side, and what would
+change it.
+
+- **Claude Code:** copy the folder to `~/.claude/skills/trading-agents-desk/` (or
+  `.claude/skills/` inside a project).
+- **Marketplaces:** `python skill/build_skill.py` writes `dist/trading-agents-desk.zip`;
+  listing copy and the upload checklist are in [`skill/LISTING.md`](skill/LISTING.md).
+
+The skill installs this package from a pinned release tag into its own virtual
+environment (`~/.tradinglab/venv`), so the tag named in `SKILL.md` must exist before the
+skill is shared. The build refuses to write the ZIP until it does.
+
+Two limits are deliberate, and the skill states both to the user:
+
+- **That mode has never been backtested.** An agent that runs the roles itself knows
+  which ticker and date it asked for, so it cannot be anonymized, and it is only sound on
+  the current date. The skill sends historical evaluation through `agents --anonymize`
+  and `probe` instead. The one published result (−0.9% against +15.7% for buy-and-hold)
+  comes from a reduced, price-only run through the API.
+- **It takes no personal inputs.** The desk is a simulation that starts from no position.
+  It does not ask for holdings, and it never trades.
+
 ## Trader dashboard (no code needed)
 
 Everything in this repo can be driven from a point-and-click web dashboard — no Python
@@ -178,7 +260,8 @@ python -m streamlit run app.py
   pipeline runs on the **latest market data** (prices, fundamentals, news) and returns a
   BUY / SELL / HOLD card with suggested exposure, the complete reasoning (every analyst
   report, the bull-vs-bear debate, the risk team's ruling), an interactive candlestick
-  chart, and the exact API cost of the run (typically $0.20–0.50; cached reruns are free).
+  chart, and the exact API cost of the run (typically $0.20–0.50; a rerun is only free
+  when the prices, fundamentals and headlines have not changed).
 - **Paper Portfolio** — a simulated account that starts with $100,000 of pretend cash
   (`results/portfolio.json`). Apply the AI desk's latest decision with one click, or buy
   and sell manually at live prices, and track profit/loss — without risking a cent.
@@ -277,7 +360,7 @@ Findings a 3-month backtest could never show:
 
 ## Verification
 
-- 62 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
+- 326 pytest tests, including **perturbation-based no-lookahead property tests** (mutate
   future rows → assert all earlier features/indicators/engine outputs are bit-identical).
 - A five-dimension adversarial review pass (lookahead, statistics, costs, data hygiene,
   prompt leakage — every finding independently re-verified before acceptance) surfaced

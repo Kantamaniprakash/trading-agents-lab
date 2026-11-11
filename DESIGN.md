@@ -30,12 +30,17 @@ trading-agents-lab/
 ├── LICENSE
 ├── pyproject.toml
 ├── requirements.txt
-├── data/cache/                  # parquet price cache
+├── data/cache/                  # parquet price cache (desk/ holds one-shot desk downloads)
 ├── cache/llm/                   # LLM response disk cache (json files)
 ├── results/                     # metrics tables, equity plots, agent transcripts
 │   ├── figures/                 # README figures (rendered by scripts/make_figures.py)
-│   └── transcripts/             # per-decision-day agent debate transcripts
+│   ├── transcripts/             # per-decision-day agent debate transcripts (backtests)
+│   └── desk/                    # one-shot `desk` runs: transcript + JSON (git-ignored)
 ├── scripts/make_figures.py      # regenerates the README figures from results + cache
+├── skill/
+│   ├── trading-agents-desk/     # agent skill: SKILL.md + references/ (text only)
+│   ├── build_skill.py           # validates the skill and writes dist/<name>.zip
+│   └── LISTING.md               # marketplace listing copy + upload checklist
 ├── src/tradinglab/
 │   ├── __init__.py
 │   ├── config.py                # central path constants + config dataclasses
@@ -43,9 +48,9 @@ trading-agents-lab/
 │   ├── features/{__init__,indicators,dataset}.py
 │   ├── models/{__init__,ml}.py
 │   ├── backtest/{__init__,metrics,engine,baselines}.py
-│   ├── agents/{__init__,llm,state,prompts,roles,graph}.py
+│   ├── agents/{__init__,llm,state,prompts,roles,graph,desk,probe}.py
 │   └── cli.py
-└── tests/test_{indicators,metrics,engine,dataset,agents_backtest}.py
+└── tests/test_{indicators,metrics,engine,dataset,agents_backtest,probe,desk,skill_package}.py
 ```
 
 ## 3. Shared conventions (every module MUST follow these)
@@ -75,6 +80,14 @@ Dataclasses `DataConfig`, `BacktestConfig`, `MLConfig`, `AgentConfig`, `LabConfi
 Every module reads its configuration from `src/tradinglab/config.py`; nothing else
 defines paths or tunables.
 
+`PROJECT_ROOT` (the parent of the caches and `results/`) resolves in this order:
+`TRADINGLAB_HOME` when set; the source checkout when the package runs from one
+(recognised by this project's layout: the package sits in `src/` next to a
+`pyproject.toml`); otherwise `~/.tradinglab`. The last case is a regular `pip install`,
+where the checkout-relative path would land inside the interpreter's `lib` directory.
+The `src/` requirement keeps a copy vendored into another project (`pip install
+--target`) from treating that project as its checkout.
+
 ## 5. Module contracts
 
 ### 5.1 data/prices.py
@@ -94,6 +107,15 @@ def fetch_prices(tickers: list[str] | str, start: str, end: str | None = None,
 ```python
 def load_universe(cfg: DataConfig) -> dict[str, pd.DataFrame]   # convenience wrapper
 ```
+- An empty download raises `PriceDataError(ValueError)` with `reason` in `rate_limited`,
+  `not_found`, `unknown`. Yahoo answers a rate limit and an unknown symbol with the same
+  empty frame, so the reason is recovered from what yfinance logs during the download
+  (a temporary handler on the `yfinance` logger). Only Yahoo's own statements count as
+  `not_found` ("Quote not found", "No data found, symbol may be delisted"). yfinance's
+  catch-all "possibly delisted" texts do not: it logs those for timeouts, resets and 5xx
+  responses on valid symbols, which must be retried, not blamed on the symbol.
+- Cache writes are best-effort: an `OSError` from `mkdir` or `to_parquet` becomes a
+  `RuntimeWarning` naming `TRADINGLAB_HOME`, and the downloaded frame is still returned.
 
 ### 5.2 data/fundamentals.py
 ```python
@@ -105,7 +127,12 @@ def fetch_fundamentals_snapshot(ticker: str) -> dict   # best-effort, live-mode 
   try/except; return `{"available": False, "error": str(e)}` on failure.
 ```python
 def format_fundamentals(snapshot: dict) -> str   # human-readable block for agent prompts
+def missing_ratio_fields(snapshot: dict) -> list[str]   # labels of ratios with no number
 ```
+- Debt/equity is printed as `Debt/equity (%)`: Yahoo quotes it in percent, and an
+  unlabelled 84.29 reads as 84x leverage.
+- One table (`_RATIOS`: snapshot key → yfinance key, label) feeds both the fields that are
+  fetched and the labels reported as missing, so the two cannot drift.
 - Document clearly: yfinance fundamentals are CURRENT, not point-in-time; using them in a
   historical backtest leaks future data, so the agent backtest only injects fundamentals when
   running in live mode.
@@ -116,6 +143,9 @@ def fetch_current_news(ticker: str, limit: int = 8) -> list[dict]  # [{"title","
 ```
 - `yfinance.Ticker(ticker).news`; tolerate schema variations (keys may be nested under
   "content"); best-effort, return [] on failure. Live-mode only; same leak warning as above.
+- Titles and publishers are third-party text bound for a prompt: whitespace is collapsed
+  to single spaces and length is capped (200 / 60 characters), so a headline is always one
+  short line and cannot pose as a section of the snapshot.
 
 ### 5.4 features/indicators.py — pure pandas, no external TA library
 Individual functions (each takes the canonical `df`, returns `pd.Series` aligned to df.index,
@@ -292,13 +322,18 @@ class MarketSnapshot:
     fundamentals: str | None = None
     news: list[str] | None = None
     anonymize: bool = False
+    data_notes: list[str] | None = None   # set only by the one-shot desk path (5.15)
 
     def context_block(self) -> str
 ```
-- `context_block()` renders everything into one text block. When `anonymize=True`, replace
-  the ticker with `"TICKER-X"` and the date with `"Day T"` **everywhere** (the builders in
-  graph.py already produce masked tables in that case; this class just picks which header
-  to render).
+- `context_block()` renders everything into one text block. When `anonymize=True` the
+  header shows `"TICKER-X"` / `"Day T"` (the builders in graph.py already produce masked
+  tables in that case), every ISO date in the block is scrubbed, and the real ticker is
+  scrubbed from the third-party text only (fundamentals and headlines), case-sensitively
+  against the ticker as typed and in upper case. It is not run over the builder's own
+  tables: a ticker that is also a word or a label (`T`, `LOW`, `CCI`) would rewrite them.
+- `data_notes`, when set, is rendered as a "Data notes" section directly under the header.
+  Backtests never set it, so their prompts are unchanged.
 ```python
 @dataclass AnalystReport:  role: str; summary: str
 @dataclass DebateTurn:     speaker: str; text: str
@@ -391,7 +426,97 @@ def run_agent_backtest(df, ticker, start, end, client, cfg, out_dir=None, every=
   `{out_dir}/{ticker}_{date}.md` when out_dir given. Print one progress line per decision
   day (this is CLI-adjacent, allowed here).
 
-### 5.15 cli.py
+### 5.15 agents/desk.py — one ticker, one snapshot, one decision
+```python
+@dataclass
+class LatestPrices: df, downloaded_at (UTC), session: dict | None, refresh_failed: bool
+def fetch_latest_prices(ticker, cache_dir=None, now=None) -> LatestPrices
+def build_desk_snapshot(ticker, date=None, live=True, anonymize=False, lookback=60,
+                        df=None, prices=None, now=None) -> DeskSnapshot
+def snapshot_to_dict(desk) -> dict
+def decision_to_dict(log, desk, usage=None, cost_usd=None) -> dict
+def render_decision_card(log, desk) -> str
+```
+- `DeskSnapshot` = `MarketSnapshot` + `as_of`, `fetched_at`, `company`,
+  `instrument_type`, `currency`, `last_close`, `history_rows`, `live`, `live_attempted`,
+  `partial_session` (True / False / None), `stale`, `prices_behind`,
+  `fundamentals_missing`, `notes`. Building one makes NO LLM call, so it
+  serves both the `snapshot` command (and through it any external agent that runs the
+  roles itself) and the `desk` command.
+- **Governing rule: a data problem is never analysed silently.** Every gap, fallback and
+  uncertainty adds a line to `notes`. The ones that change how the data must be read
+  (unfinished session, unknown session state, old or stale bar, prices behind, a
+  non-dollar currency, incomplete fundamentals) are also copied into
+  `MarketSnapshot.data_notes` and rendered at the top
+  of the context block, so the agents are told as well as the caller. Advice aimed at the
+  caller ("re-run in a minute") stays out of the prompt. With no such notes the rendered
+  block is byte-identical to the backtest path's (a test pins this), so cached responses
+  and published transcripts stay reproducible.
+- **Prices are never trusted from an old file.** `fetch_latest_prices` downloads on every
+  call unless the previous download is younger than `_PRICE_REUSE_S` (15 min) and is not
+  already known to be missing the newest session (otherwise the documented "wait and
+  fetch again" could never clear the flag). A download stamped in the future is not
+  reused either. An empty answer (Yahoo's response to rate limiting) is retried once
+  after `_RETRY_WAIT_S`, except when Yahoo says the symbol does not exist; if it is still
+  empty and an earlier download is on disk, that is returned with `refresh_failed=True`
+  and the snapshot says the prices may be behind. Downloads go to `data/cache/desk/`,
+  never the research cache: they can end in an intraday bar, which must not reach a
+  backtest through a shared file.
+- **The sidecar must describe its price file.** `*.meta.json` records the download time,
+  a fingerprint of the frame (row count, newest bar's date, close and volume) and the
+  exchange facts. It is written (atomically) right after the download and again once the
+  metadata request returns, and a sidecar whose fingerprint does not match the parquet is
+  ignored, so neither an interrupted run nor a failed cache write can leave prices judged
+  by another download's time and calendar. A download whose session state came out
+  undecided is not reused from the 15-minute window: a second look is what settles it.
+  If that second look fails, the first is returned (minutes old, still undecided), not
+  flagged as behind, with `recheck_failed` set so the caller is told the attempt failed.
+  That note goes to the caller only: the data, and so the prompt, are unchanged. Cache writes are best-effort: an unwritable
+  directory costs the cache, not the run.
+- **Session state uses the exchange's own clock.** Yahoo dates a daily bar by the
+  exchange's local day and includes the session in progress. `_fetch_session_info` reads
+  the exchange time zone, instrument type, the regular session end and the last trade
+  time from Yahoo's chart metadata (one request per download). With it,
+  `_last_bar_is_partial` covers Tokyo, crypto (today's bar is never final) and US
+  half-days. The calendar is cross-checked, not trusted: it has been seen an hour early
+  for a venue, with trades still printing. A trade stamped up to an hour (plus the settle
+  window) after the calendar's close means "unknown" until the feed has been quiet for
+  `_FEED_QUIET` (45 min); one stamped later than that is a late-reported print (London).
+  A late stamp on an index is ignored, because Yahoo publishes index closes about an hour
+  after the bell (cost: an index on a venue whose calendar is early is called a close).
+  A last trade before the close keeps the bar open for `_MAX_FEED_DELAY` (30 min) past
+  the settle window, for indices too, because Yahoo's quotes run 10 to 20 minutes behind
+  on many venues. Known limit: where the calendar is an hour early, a trade stamped in
+  the 15 minutes after its close is read as the closing print, so the bar is called final
+  while the session still has most of an hour to run: for up to 15 minutes with a delayed
+  feed, and for a thinly traded symbol as long as its latest trade sits in that window. Without a calendar,
+  only plainly old bars (36 h rule) and US-style symbols (New York clock) are decided;
+  anything else is `None` and reported as unknown, never guessed as a close. If Yahoo reports trading on a later day than the newest usable bar
+  (it sometimes returns a row with volume and no prices, which the loader drops), the
+  snapshot is flagged `prices_behind`.
+- **Lookahead guard**: fundamentals/news are injected only when the snapshot is for the
+  newest bar. A past `date` never receives them (Yahoo serves current values only).
+  `anonymize=True` also drops them, since company figures and headlines defeat masking.
+  Session checks describe the newest bar and are skipped for past dates. `date` is
+  validated: empty, NaT and future values raise instead of falling through to "latest".
+- **Old versus stale.** A newest bar more than `_OLD_BAR_NOTE_DAYS` (5) old is noted; more
+  than `_STALE_AFTER_DAYS` (12) sets `stale`, which stops the paid desk. Twelve days is
+  longer than any scheduled exchange closure, so a holiday week is not mistaken for a
+  halted symbol. The holiday / halted wording follows the bar's age when it was
+  downloaded: after a failed refresh a bar can be old only because the download is.
+- **Currencies.** The chart metadata's currency is what prices are quoted in; a note says
+  so for anything but USD, for past dates as well as the newest bar, and spells out minor
+  units (GBp is pence). Statements are often
+  in another currency (`financialCurrency`): the quarterly lines carry it, and a note
+  says when it differs from the share currency.
+- **"available" is not trusted.** Yahoo answers a rate-limited fundamentals request with
+  `available: True` and no figures. `missing_ratio_fields` counts the ratios that actually
+  arrived; an all-empty answer is retried once; an answer with nothing in it yields
+  `fundamentals=None` (never an error string dressed up as a block); a partial answer
+  names what is missing.
+- No prints (library code); the CLI does all output.
+
+### 5.16 cli.py
 argparse with subcommands (all print readable tables and save CSV/PNG to results/):
 - `download` — fetch universe, print row counts per ticker.
 - `baselines [--tickers ...] [--start] [--end] [--cost-bps]` — run all 5 baselines per
@@ -405,8 +530,33 @@ argparse with subcommands (all print readable tables and save CSV/PNG to results
   [--long-only] [--max-days N]` — needs API key; runs agent backtest; `--live` additionally
   fetches fundamentals+news (only sensible when end ≈ today); prints final metrics and
   token usage/cost summary; transcripts to `results/transcripts/`.
+- `snapshot --ticker AAPL [--date] [--no-live] [--anonymize] [--json]` — no API key; prints
+  the exact context block the agents see plus metadata and data-quality notes (`--json`:
+  one JSON document on stdout).
+- `desk --ticker AAPL [--date] [--no-live] [--anonymize] [--json] [--debate-rounds N]
+  [--allow-degraded]` — needs API key; one `pipeline.decide` on that snapshot; prints a
+  decision card and the token usage/cost table; saves `results/desk/{ticker}_{as_of}.md`
+  and `.json`. Kept out of `results/transcripts/`, which the dashboard replays as backtest
+  decision days. With `--json`, stdout carries the JSON only and progress goes to stderr.
+  **Spend gate**: exits 1 before any LLM call when the snapshot is stale, prices are
+  behind, or live data was asked for (`live_attempted`, set by the snapshot builder, not
+  inferred from the flags) and none came back; `--allow-degraded` overrides.
+- Output discipline for both: JSON on stdout is ASCII-only (`ensure_ascii=True`) and
+  `main()` sets `errors="backslashreplace"` on stdout/stderr, because headlines and LLM
+  text hold arbitrary characters and a Windows pipe (cp1252) would otherwise abort the
+  print.
+- Write checks: for the commands whose product is a file (`baselines`, `train-ml`,
+  `agents`, `probe`, `desk`) `main()` proves `results/` is writable by really creating a
+  file there under a name of its own (`mkdir(exist_ok=True)` succeeds on a read-only
+  folder; `tempfile.mkstemp` is avoided because older Pythons on Windows retry "access
+  denied" about two billion times), and for the three
+  that call the API the LLM cache too, and exits with one `error:` line naming
+  `TRADINGLAB_HOME` otherwise, before any work or spend. `download` checks its cache
+  folder the same way, since the cache is its whole product. `snapshot` and `report` need
+  no writable folder; for them and for the backtests the price cache is best-effort.
 - `report` — load saved CSVs and print a combined summary.
-main() entry: `python -m tradinglab.cli <cmd>`.
+main() entry: `python -m tradinglab.cli <cmd>`, or the `tradinglab` console command.
+`--version` prints `tradinglab <version>`; the skill's setup check compares it.
 
 ## 6. Tests (pytest; `pythonpath = ["src"]` configured in pyproject)
 
@@ -429,6 +579,20 @@ main() entry: `python -m tradinglab.cli <cmd>`.
   `--max-days` caps decision count without shrinking the evaluation window; CLI rejects
   non-positive `--every`/`--max-days`; price download end date is inclusive — all with
   the agent pipeline stubbed and yfinance monkeypatched (no network, no API calls).
+- **test_desk.py**: workspace resolution (env override, checkout, installed and vendored
+  fallbacks, and that the path constants really follow the resolver); desk snapshot
+  no-lookahead (perturb rows after the analysis date → identical context block, close and
+  flags); `--date` validation; past dates and anonymized snapshots never fetch live data;
+  empty / incomplete / retried fundamentals; headline sanitising; the anonymize scrub on
+  word-like tickers; session state on the exchange clock (US boundary, Tokyo, crypto,
+  half-day, unknown), the stale threshold, prices behind; the download policy (desk-only
+  cache, 15-minute reuse, retry, fallback, sidecar); `snapshot` / `desk` CLI output,
+  encoding safety, artifacts and the spend gate, with the pipeline stubbed.
+- **test_skill_package.py**: skill frontmatter and packaging rules; every `tradinglab ...`
+  line in the skill's docs is parsed with the real argparse parser, so renaming a
+  subcommand or flag fails a test instead of a user's terminal; the install URL is pinned
+  to the release tag that matches the package version; the skill's text keeps its
+  promises (disclosure, no trading, no personal inputs).
 - Tests must not hit the network — construct synthetic DataFrames (seeded RNG, ~400 rows,
   business-day index).
 

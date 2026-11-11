@@ -10,17 +10,35 @@ from __future__ import annotations
 import pandas as pd
 import yfinance as yf
 
-# snapshot key -> yfinance .info key
-_INFO_KEYS = {
-    "trailing_pe": "trailingPE",
-    "forward_pe": "forwardPE",
-    "market_cap": "marketCap",
-    "profit_margins": "profitMargins",
-    "return_on_equity": "returnOnEquity",
-    "debt_to_equity": "debtToEquity",
-    "revenue_growth": "revenueGrowth",
-    "earnings_growth": "earningsGrowth",
+# snapshot key -> (yfinance .info key, label used in notes). One table, so
+# the fields that are fetched and the fields that are reported as missing
+# cannot drift apart.
+_RATIOS = {
+    "trailing_pe": ("trailingPE", "trailing P/E"),
+    "forward_pe": ("forwardPE", "forward P/E"),
+    "market_cap": ("marketCap", "market cap"),
+    "profit_margins": ("profitMargins", "profit margin"),
+    "return_on_equity": ("returnOnEquity", "return on equity"),
+    "debt_to_equity": ("debtToEquity", "debt/equity"),
+    "revenue_growth": ("revenueGrowth", "revenue growth"),
+    "earnings_growth": ("earningsGrowth", "earnings growth"),
 }
+_INFO_KEYS = {name: info_key for name, (info_key, _label) in _RATIOS.items()}
+RATIO_LABELS = {name: label for name, (_info_key, label) in _RATIOS.items()}
+
+
+def missing_ratio_fields(snapshot: dict) -> list[str]:
+    """Labels of the ratio fields Yahoo returned no usable number for.
+
+    A snapshot can be ``available`` and still carry nothing: when Yahoo
+    rate-limits, ``.info`` comes back empty and every ratio is None. Funds
+    and some foreign listings legitimately lack several of these fields.
+    """
+    return [
+        label for key, label in RATIO_LABELS.items()
+        if not isinstance(snapshot.get(key), (int, float))
+        or isinstance(snapshot.get(key), bool)
+    ]
 
 
 def _quarterly_trend(stmt: object, row: str, n: int = 4) -> dict[str, float]:
@@ -55,6 +73,11 @@ def fetch_fundamentals_snapshot(ticker: str) -> dict:
         snapshot: dict = {"available": True, "ticker": ticker}
         for name, key in _INFO_KEYS.items():
             snapshot[name] = info.get(key)
+        # The currency the company reports its statements in. It is often not
+        # the currency the shares trade in (London quotes in pence, ADRs in
+        # dollars), so the statement lines are labelled with it.
+        reported_in = info.get("financialCurrency")
+        snapshot["financial_currency"] = reported_in if isinstance(reported_in, str) else None
         try:
             stmt = tkr.quarterly_income_stmt
         except Exception:
@@ -94,10 +117,13 @@ def format_fundamentals(snapshot: dict) -> str:
         f"  Market cap:        {_fmt_size(snapshot.get('market_cap'))}",
         f"  Profit margin:     {_fmt_num(snapshot.get('profit_margins'), pct=True)}",
         f"  Return on equity:  {_fmt_num(snapshot.get('return_on_equity'), pct=True)}",
-        f"  Debt/equity:       {_fmt_num(snapshot.get('debt_to_equity'))}",
+        # Yahoo quotes total debt / equity as a percentage (84.29 means 0.84x).
+        f"  Debt/equity (%):   {_fmt_num(snapshot.get('debt_to_equity'))}",
         f"  Revenue growth:    {_fmt_num(snapshot.get('revenue_growth'), pct=True)}",
         f"  Earnings growth:   {_fmt_num(snapshot.get('earnings_growth'), pct=True)}",
     ]
+    reported_in = snapshot.get("financial_currency")
+    order = f"{reported_in}, newest first" if reported_in else "newest first"
     for label, key in (
         ("Quarterly revenue", "quarterly_revenue"),
         ("Quarterly net income", "quarterly_net_income"),
@@ -105,5 +131,5 @@ def format_fundamentals(snapshot: dict) -> str:
         trend = snapshot.get(key) or {}
         if trend:
             parts = ", ".join(f"{d}: {_fmt_size(v)}" for d, v in trend.items())
-            lines.append(f"  {label} (newest first): {parts}")
+            lines.append(f"  {label} ({order}): {parts}")
     return "\n".join(lines)

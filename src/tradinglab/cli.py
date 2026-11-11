@@ -5,6 +5,8 @@ Subcommands:
     baselines  run the paper's five rule baselines + equal-weight portfolio
     train-ml   walk-forward LightGBM alpha model vs buy-and-hold
     agents     LLM multi-agent backtest for one ticker (needs ANTHROPIC_API_KEY)
+    snapshot   print the market snapshot the agents see for one ticker (no API key)
+    desk       one-shot agent decision on the latest close (needs ANTHROPIC_API_KEY)
     probe      memorization probe: can the LLM recall a window? (needs ANTHROPIC_API_KEY)
     report     print a combined summary of previously saved result CSVs
 
@@ -15,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -25,6 +29,7 @@ matplotlib.use("Agg")  # must be set before pyplot is imported (headless-safe)
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 
+from tradinglab import __version__  # noqa: E402
 from tradinglab.backtest.baselines import STRATEGIES  # noqa: E402
 from tradinglab.backtest.engine import backtest_portfolio, backtest_signals  # noqa: E402
 from tradinglab.backtest.metrics import metrics_table  # noqa: E402
@@ -160,6 +165,9 @@ def _usage_table(usage: dict) -> pd.DataFrame:
 def cmd_download(args: argparse.Namespace) -> None:
     """Fetch/cache the universe and print row counts per ticker."""
     cfg = DataConfig(tickers=list(args.tickers), start=args.start, end=args.end)
+    # The cache is this command's whole product: refuse before downloading
+    # anything rather than download everything and save none of it.
+    _require_writable(cfg.cache_dir)
     prices = fetch_prices(
         cfg.tickers, cfg.start, cfg.end, cache_dir=cfg.cache_dir, force=args.force
     )
@@ -456,6 +464,168 @@ def cmd_agents(args: argparse.Namespace) -> None:
     print(f"transcripts: {out_dir}")
 
 
+_WRITES_RESULTS = {"baselines", "train-ml", "agents", "desk", "probe"}
+_USES_LLM_CACHE = {"agents", "desk", "probe"}
+
+
+def _exit_unwritable(directory: Path, exc: OSError) -> None:
+    print(
+        f"error: cannot write to {directory} ({exc.strerror or exc}). "
+        "Set TRADINGLAB_HOME to a writable directory and rerun.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _require_writable(directory: Path) -> None:
+    """Exit 1 with one clear line unless a file can really be created in ``directory``.
+
+    ``mkdir(exist_ok=True)`` succeeds on a directory that exists but is
+    read-only, so the only honest test is to write something.
+    """
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        # A name of its own, so two runs starting together cannot trip over
+        # each other's probe. Not tempfile.mkstemp: on Windows, older Pythons
+        # take "access denied" for a name collision and try again os.TMP_MAX
+        # (2**31 - 1) times instead of raising.
+        probe = directory / f".write-test-{os.getpid()}-{secrets.token_hex(8)}"
+        os.close(os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        os.unlink(probe)
+    except OSError as exc:
+        _exit_unwritable(directory, exc)
+
+
+def _build_desk_snapshot_or_exit(args: argparse.Namespace):
+    """Shared snapshot construction for ``snapshot`` and ``desk`` (exit 1 on bad input)."""
+    from tradinglab.agents.desk import build_desk_snapshot
+
+    try:
+        return build_desk_snapshot(
+            args.ticker, date=args.date, live=not args.no_live,
+            anonymize=args.anonymize, lookback=AgentConfig().lookback_days,
+        )
+    except ValueError as exc:  # unknown symbol, empty ticker, date before history
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_snapshot(args: argparse.Namespace) -> None:
+    """Print the market snapshot the agents would see for one ticker.
+
+    No LLM call and no API key: this is the data half of the pipeline, for
+    inspecting prompts or for an external agent that runs the roles itself.
+    """
+    from tradinglab.agents.desk import DISCLAIMER, price_phrase, snapshot_to_dict
+
+    desk = _build_desk_snapshot_or_exit(args)
+    payload = snapshot_to_dict(desk)
+    if args.json:
+        # ASCII-only on stdout: headlines carry arbitrary characters, and a
+        # Windows pipe (cp1252) would otherwise abort the print mid-document.
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
+        return
+
+    print(payload["context"])
+    print("\n--- Snapshot metadata ---")
+    ticker_line = f"ticker: {payload['ticker']}"
+    about = [payload[key] for key in ("company", "instrument_type", "currency") if payload[key]]
+    if about:
+        ticker_line += f" ({', '.join(about)})"
+    print(ticker_line)
+    print(
+        f"as of: {payload['as_of']} ({price_phrase(desk)}, "
+        f"{payload['history_rows']} daily bars), fetched {payload['fetched_at']}"
+    )
+    fundamentals = "yes" if payload["has_fundamentals"] else "no"
+    if payload["fundamentals_missing"]:
+        fundamentals += f" (missing: {', '.join(payload['fundamentals_missing'])})"
+    print(f"fundamentals: {fundamentals} | news headlines: {payload['news_headlines']}")
+    for note in payload["notes"]:
+        print(f"note: {note}")
+    print(f"\n{DISCLAIMER}")
+
+
+def cmd_desk(args: argparse.Namespace) -> None:
+    """Run the full agent pipeline once on a single snapshot and report the decision."""
+    # Heavy imports (anthropic) deferred so key-less environments can still
+    # run download/baselines/train-ml/snapshot/report.
+    from tradinglab.agents.desk import decision_to_dict, render_decision_card
+    from tradinglab.agents.graph import TradingAgentsPipeline
+    from tradinglab.agents.llm import LLMClient
+
+    # With --json, stdout carries the JSON document only; progress goes to stderr.
+    info = sys.stderr if args.json else sys.stdout
+
+    desk = _build_desk_snapshot_or_exit(args)
+
+    # Refuse to spend API credit on data that is known to be bad. Whether live
+    # inputs were wanted is what the snapshot builder actually did, not a guess
+    # from the flags: --date <the newest bar> still asks Yahoo for them.
+    problems = []
+    if desk.stale:
+        problems.append("the newest bar is stale")
+    if desk.prices_behind:
+        problems.append("the prices are behind the market")
+    if desk.live_attempted and not desk.live:
+        problems.append("Yahoo returned no fundamentals and no headlines")
+    if problems and not args.allow_degraded:
+        print(f"error: not running the desk: {'; '.join(problems)}.", file=sys.stderr)
+        for note in desk.notes:
+            print(f"note: {note}", file=sys.stderr)
+        print(
+            "Nothing was spent. Retry in a minute, or pass --allow-degraded to "
+            "run on this data anyway.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # The transcript is the product of a paid run. Prove it can be saved
+    # before paying for it (main() has already checked the LLM cache).
+    out_dir = RESULTS_DIR / "desk"
+    _require_writable(out_dir)
+
+    agent_cfg = AgentConfig(debate_rounds=args.debate_rounds)
+    print(
+        f"{desk.snapshot.ticker}: running the agent desk as of {desk.as_of} "
+        f"(debate rounds={agent_cfg.debate_rounds}, live data={desk.live}, "
+        f"anonymize={args.anonymize})",
+        file=info,
+    )
+
+    client = LLMClient(agent_cfg, cache_dir=LLM_CACHE_DIR)
+    try:
+        log = TradingAgentsPipeline(client, agent_cfg).decide(desk.snapshot)
+    except RuntimeError as exc:  # missing API key surfaces here
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    usage_table = _usage_table(client.usage)
+    cost = float(usage_table.loc["TOTAL", "cost_usd"]) if not usage_table.empty else 0.0
+    payload = decision_to_dict(log, desk, usage=client.usage, cost_usd=cost)
+
+    # results/desk/ is kept apart from results/transcripts/, which holds
+    # backtest decision days that the dashboard replays into equity curves.
+    stem = f"{desk.snapshot.ticker}_{desk.as_of}"
+    md_path = out_dir / f"{stem}.md"
+    json_path = out_dir / f"{stem}.json"
+    md_path.write_text(log.to_markdown(), encoding="utf-8")
+    payload["transcript_path"] = str(md_path)
+    with open(json_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+
+    if args.json:
+        # ASCII-only on stdout (see cmd_snapshot); the saved file keeps UTF-8.
+        print(json.dumps(payload, ensure_ascii=True, indent=2))
+    else:
+        print()
+        print(render_decision_card(log, desk))
+        if not usage_table.empty:
+            _print_table(usage_table, "Token usage / cost (USD)")
+    print(f"\nsaved: {md_path}", file=info)
+    print(f"saved: {json_path}", file=info)
+
+
 def cmd_probe(args: argparse.Namespace) -> None:
     """Probe the backbone LLM for memorized knowledge of a price window."""
     # Heavy imports (anthropic) deferred so key-less environments can still
@@ -591,6 +761,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="tradinglab",
         description="TradingAgents research lab: baselines, ML alpha, LLM agents.",
     )
+    parser.add_argument("--version", action="version", version=f"tradinglab {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
     data_defaults = DataConfig()
     ml_defaults = MLConfig()
@@ -638,6 +809,45 @@ def build_parser() -> argparse.ArgumentParser:
     p_ag.add_argument("--cost-bps", type=float, default=bt_defaults.cost_bps)
     p_ag.set_defaults(func=cmd_agents)
 
+    def _add_snapshot_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--ticker", required=True)
+        p.add_argument(
+            "--date", default=None,
+            help="analysis date YYYY-MM-DD (default: latest available close)",
+        )
+        p.add_argument(
+            "--no-live", action="store_true",
+            help="skip current fundamentals + news (prices and indicators only)",
+        )
+        p.add_argument(
+            "--anonymize", action="store_true",
+            help="mask ticker/dates and rebase price levels (drops fundamentals + news)",
+        )
+        p.add_argument("--json", action="store_true", help="print one JSON document")
+
+    p_sn = sub.add_parser(
+        "snapshot",
+        help="print the market snapshot the agents see for one ticker (no API key)",
+    )
+    _add_snapshot_args(p_sn)
+    p_sn.set_defaults(func=cmd_snapshot)
+
+    p_dk = sub.add_parser(
+        "desk",
+        help="one-shot agent decision on the latest close (needs API key)",
+    )
+    _add_snapshot_args(p_dk)
+    p_dk.add_argument(
+        "--debate-rounds", type=_positive_int, default=AgentConfig().debate_rounds,
+        help="bull/bear exchanges before the verdict (>= 1)",
+    )
+    p_dk.add_argument(
+        "--allow-degraded", action="store_true",
+        help="run even when the snapshot is stale, could not be refreshed, or "
+             "came back with no fundamentals and no headlines",
+    )
+    p_dk.set_defaults(func=cmd_desk)
+
     p_pr = sub.add_parser(
         "probe",
         help="memorization probe: can the LLM recall this window? (needs API key)",
@@ -662,9 +872,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: parse args, ensure results dir, dispatch."""
+    """CLI entry point: parse args, ensure the data directories, dispatch."""
+    # Text that came from Yahoo or from an LLM can hold any character. On a
+    # console or pipe that cannot encode one, print an escape instead of dying.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="backslashreplace")
+
     args = build_parser().parse_args(argv)
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    # Commands whose product is a file must be able to write it, and say so in
+    # one line when they cannot, before doing any work or spending anything.
+    # The price cache is best-effort for every command except "download",
+    # whose product it is and which checks it itself. "snapshot" and "report"
+    # write nothing else.
+    if args.command in _WRITES_RESULTS:
+        _require_writable(RESULTS_DIR)
+    if args.command in _USES_LLM_CACHE:
+        _require_writable(LLM_CACHE_DIR)
     args.func(args)
 
 

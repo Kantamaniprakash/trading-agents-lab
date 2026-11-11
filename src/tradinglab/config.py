@@ -8,7 +8,33 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+def _resolve_project_root(module_file: Path | str = __file__) -> Path:
+    """Directory that holds the price cache, the LLM cache and ``results/``.
+
+    1. ``TRADINGLAB_HOME`` when set (explicit override).
+    2. The source checkout, when running from one (editable install or
+       ``PYTHONPATH=src``) — recognised by this project's layout: the
+       package sits in ``src/`` next to a ``pyproject.toml``.
+    3. ``~/.tradinglab`` for a regular ``pip install``. Without this the
+       paths below would resolve inside the interpreter's ``lib`` directory,
+       which is often read-only and never where a user expects output.
+
+    The ``src`` check matters: a copy vendored into some other project
+    (``pip install --target``) also has a ``pyproject.toml`` two levels up,
+    and must not scatter caches and results through that project.
+    """
+    override = os.environ.get("TRADINGLAB_HOME")
+    if override:
+        return Path(override).expanduser().resolve()
+    src_dir = Path(module_file).resolve().parents[1]
+    checkout = src_dir.parent
+    if src_dir.name == "src" and (checkout / "pyproject.toml").is_file():
+        return checkout
+    return Path.home() / ".tradinglab"
+
+
+PROJECT_ROOT = _resolve_project_root()
 DATA_CACHE_DIR = PROJECT_ROOT / "data" / "cache"
 LLM_CACHE_DIR = PROJECT_ROOT / "cache" / "llm"
 RESULTS_DIR = PROJECT_ROOT / "results"

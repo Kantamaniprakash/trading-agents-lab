@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trading-agents-lab"
-version = "0.1.0"
+version = "0.2.0"
 description = "Rigorous reimplementation of the TradingAgents multi-agent LLM trading framework with a quant research harness"
 authors = [{ name = "Satya Sai Prakash Kantamani" }]
 license = { text = "MIT" }
@@ -19,6 +19,9 @@ dependencies = [
     "pyarrow>=14.0",
     "anthropic>=0.40",
 ]
+
+[project.scripts]
+tradinglab = "tradinglab.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]

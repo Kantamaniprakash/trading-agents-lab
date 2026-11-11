@@ -14,3 +14,4 @@ dist/
 .claude/
 results/portfolio.json
 results/live_decisions.csv
+results/desk/

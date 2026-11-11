@@ -6,7 +6,9 @@ lowercase columns ``open, high, low, close, volume``, auto-adjusted prices
 """
 from __future__ import annotations
 
+import logging
 import time
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -16,6 +18,69 @@ from tradinglab.config import DATA_CACHE_DIR, DataConfig
 
 _OHLCV = ["open", "high", "low", "close", "volume"]
 _STALE_SECONDS = 3 * 24 * 3600  # "latest" caches expire after 3 days
+
+
+class PriceDataError(ValueError):
+    """Yahoo returned no usable prices.
+
+    ``reason`` is ``"rate_limited"``, ``"not_found"`` or ``"unknown"``. Yahoo
+    answers a rate-limited request and an unknown symbol with the same empty
+    frame; the two need opposite responses (wait and retry, or stop), so the
+    reason is recovered from what yfinance logged during the download.
+    """
+
+    def __init__(self, message: str, reason: str = "unknown"):
+        super().__init__(message)
+        self.reason = reason
+
+
+class _YahooLog(logging.Handler):
+    """Collects what yfinance logs while a download runs."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.messages.append(record.getMessage())
+        except Exception:
+            pass
+
+
+_RATE_LIMIT_MARKS = ("ratelimit", "rate limit", "too many requests")
+# Only Yahoo's own "this symbol does not exist" answers. yfinance's catch-all
+# texts ("possibly delisted", "no timezone found", "no price data found") are
+# NOT here: it logs those for every request it swallowed, including timeouts,
+# connection resets and 5xx responses, where the symbol is perfectly valid.
+_NOT_FOUND_MARKS = ("quote not found", "not found for symbol", 'yahoo error = "no data found')
+
+
+def _empty_download_error(ticker: str, start: str, end: str | None,
+                          logged: list[str]) -> PriceDataError:
+    """Build the error for an empty download from what Yahoo said about it."""
+    text = " ".join(logged).lower()
+    prefix = f"Yahoo returned no price data for ticker '{ticker}' (start={start}, end={end})"
+    if any(mark in text for mark in _RATE_LIMIT_MARKS):
+        return PriceDataError(
+            f"{prefix}: Yahoo is rate-limiting requests from this machine. "
+            "Wait a minute and retry.", "rate_limited")
+    if any(mark in text for mark in _NOT_FOUND_MARKS):
+        return PriceDataError(
+            f"{prefix}: Yahoo does not know this symbol, or has no prices for "
+            "it in that range. Check the symbol.", "not_found")
+    return PriceDataError(
+        f"{prefix}: no reason was given. The symbol or date range may be "
+        "wrong, Yahoo may be rate-limiting, or this machine cannot reach "
+        "Yahoo: wait a minute and retry.", "unknown")
+
+
+def _warn_cache_unwritable(cache_root: Path, exc: OSError) -> None:
+    warnings.warn(
+        f"price cache {cache_root} is not writable ({exc.strerror or exc}); "
+        "continuing without it. Set TRADINGLAB_HOME to a writable directory.",
+        RuntimeWarning, stacklevel=3,
+    )
 
 
 def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -83,13 +148,20 @@ def fetch_prices(
     ("latest" stands in for ``end`` when it is None, and such caches go stale
     after 3 days). ``force=True`` bypasses the cache and re-downloads.
 
-    Returns ``{ticker: df}`` in the canonical schema. Raises ``ValueError`` if a
-    ticker yields no usable data.
+    Returns ``{ticker: df}`` in the canonical schema. Raises ``PriceDataError``
+    (a ``ValueError``) if Yahoo returns nothing for a ticker, with the reason
+    it gave, and ``ValueError`` if every row it returned was unusable. A cache
+    directory that cannot be written is reported as a warning, not an error.
     """
     if isinstance(tickers, str):
         tickers = [tickers]
     cache_root = Path(cache_dir) if cache_dir is not None else DATA_CACHE_DIR
-    cache_root.mkdir(parents=True, exist_ok=True)
+    # The cache is a convenience. A read-only data directory must not turn
+    # prices that Yahoo did deliver into a traceback.
+    try:
+        cache_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _warn_cache_unwritable(cache_root, exc)
     end_tag = "latest" if end is None else end
     # yfinance 'end' is exclusive; request one extra day so 'end' is inclusive.
     yf_end = None if end is None else (
@@ -104,19 +176,25 @@ def fetch_prices(
             df.index = pd.DatetimeIndex(df.index)
             out[ticker] = df
             continue
-        raw = yf.download(ticker, start=start, end=yf_end, auto_adjust=True, progress=False)
+        yahoo_log = _YahooLog()
+        yf_logger = logging.getLogger("yfinance")
+        yf_logger.addHandler(yahoo_log)
+        try:
+            raw = yf.download(ticker, start=start, end=yf_end, auto_adjust=True, progress=False)
+        finally:
+            yf_logger.removeHandler(yahoo_log)
         if raw is None or len(raw) == 0:
-            raise ValueError(
-                f"No price data returned for ticker '{ticker}' "
-                f"(start={start}, end={end}). Check the symbol and date range."
-            )
+            raise _empty_download_error(ticker, start, end, yahoo_log.messages)
         df = _normalize(raw, ticker)
         if df.empty:
             raise ValueError(
                 f"Ticker '{ticker}': every downloaded row had NaN OHLCV values "
                 f"(start={start}, end={end})."
             )
-        df.to_parquet(cache_file)
+        try:
+            df.to_parquet(cache_file)
+        except OSError as exc:
+            _warn_cache_unwritable(cache_root, exc)
         out[ticker] = df
     return out
 
