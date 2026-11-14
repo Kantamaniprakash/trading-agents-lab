@@ -44,3 +44,9 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
+
+[tool.ruff.format]
+# The skill's shipped scripts carry a hash of their own text and a 20,000-byte cap; the
+# formatter would re-indent them and break both. skill/build_skill.py is the only tool that
+# writes them. `ruff check` still lints them: it changes nothing without --fix.
+exclude = ["skill/trading-agents-desk/scripts/*.py"]

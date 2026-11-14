@@ -15,6 +15,7 @@ the numbers must be read are written into the prompt as well.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -60,6 +61,10 @@ _FEED_QUIET = pd.Timedelta(minutes=45)
 # rule Yahoo had wrong). A last trade stamped later than that after the
 # calendar's close is a late-reported print, not a session still running.
 _MAX_CALENDAR_ERROR = pd.Timedelta(hours=1)
+# A last price this far outside the day's range, as a fraction of the bound,
+# is rounding. Further out it is not that day's close.
+_RANGE_TOLERANCE = 1e-4
+_BAR_COLUMNS = ("open", "high", "low", "close", "volume")
 # Quote currencies that are a hundredth of the currency people mean.
 _MINOR_UNITS = {"GBp": ("pence", "GBP"), "GBX": ("pence", "GBP"),
                 "ZAc": ("cents", "ZAR"), "ILA": ("agorot", "ILS")}
@@ -102,14 +107,18 @@ class LatestPrices:
     downloaded_at: pd.Timestamp          # tz-aware UTC
     # Exchange facts captured with the download: {"exchange_tz",
     # "instrument_type", "currency", "regular_end" (UTC ISO), "last_trade"
-    # (UTC ISO or None), "name"}; None when Yahoo's chart metadata could not
-    # be read.
+    # (UTC ISO or None), "last_price" (the price of that trade, or None),
+    # "name"}; None when Yahoo's chart metadata could not be read.
     session: dict | None = None
     # True when Yahoo returned nothing now and ``df`` is an earlier download.
     refresh_failed: bool = False
     # True when only the second look at an undecided bar failed and ``df`` is
     # the first look, minutes old: not behind, but the caller must be told.
     recheck_failed: bool = False
+    # Set when Yahoo's daily row for the newest session had no close yet and
+    # the last regular-market price was used instead: that bar, as {"date",
+    # "open", "high", "low", "close", "volume"}. ``df`` already ends with it.
+    late_close: dict | None = None
 
 
 def _fetch_session_info(ticker: str) -> dict | None:
@@ -138,14 +147,44 @@ def _fetch_session_info(ticker: str) -> dict | None:
         else:
             last_trade = None
         currency = meta.get("currency")
+        price = meta.get("regularMarketPrice")
+        priced = isinstance(price, (int, float)) and math.isfinite(price)
         return {
             "exchange_tz": exchange_tz,
             "instrument_type": str(meta.get("instrumentType") or ""),
             "currency": str(currency) if currency else None,
             "regular_end": regular_end.isoformat(),
             "last_trade": last_trade,
+            "last_price": float(price) if priced else None,
             "name": str(name) if name else None,
         }
+    except Exception:
+        return None
+
+
+def _fetch_raw_tail(ticker: str, since: pd.Timestamp) -> pd.DataFrame | None:
+    """Yahoo's daily rows from ``since`` on as it sends them: unadjusted, none dropped.
+
+    The normal download adjusts prices by the ratio of adjusted close to
+    close, so a row without a close leaves it with no open, high or low
+    either. This is the only way to see what Yahoo did send for that row.
+    Costs one request, made only when the newest session is missing. Returns
+    None on any failure.
+    """
+    try:
+        import yfinance as yf
+
+        # keepna: yfinance otherwise leaves out a row that is all nulls and
+        # zeros, and a day Yahoo sent empty would not be seen as missing.
+        raw = yf.Ticker(ticker).history(start=f"{since:%Y-%m-%d}", interval="1d",
+                                        auto_adjust=False, actions=False, keepna=True)
+        raw = raw.rename(columns=lambda c: str(c).strip().lower())
+        tail = raw.loc[:, list(_BAR_COLUMNS)].astype(float)
+        idx = pd.DatetimeIndex(tail.index)
+        if idx.tz is not None:
+            idx = idx.tz_localize(None)
+        tail.index = idx.normalize()
+        return tail.sort_index()
     except Exception:
         return None
 
@@ -169,11 +208,16 @@ def _read_cached_prices(cache_file: Path, meta_file: Path) -> LatestPrices | Non
             raise ValueError("sidecar belongs to a different download")
         downloaded_at = _utc(pd.Timestamp(meta["downloaded_at"]))
         session = meta.get("session") if isinstance(meta.get("session"), dict) else None
+        # Sidecars written before late closes were filled have no such field.
+        late_close = meta.get("late_close")
+        filled = df if late_close is None else _with_late_close(df, late_close)
     except Exception:
         # No usable sidecar: the file's own timestamp is the best record there is.
         downloaded_at = pd.Timestamp(cache_file.stat().st_mtime, unit="s", tz="UTC")
-        session = None
-    return LatestPrices(df=df, downloaded_at=downloaded_at, session=session)
+        session = late_close = None
+        filled = df
+    return LatestPrices(df=filled, downloaded_at=downloaded_at, session=session,
+                        late_close=late_close)
 
 
 def _fingerprint(df: pd.DataFrame) -> list:
@@ -188,8 +232,12 @@ def _fingerprint(df: pd.DataFrame) -> list:
 
 
 def _write_sidecar(meta_file: Path, df: pd.DataFrame, downloaded_at: pd.Timestamp,
-                   session: dict | None) -> None:
+                   session: dict | None, late_close: dict | None = None) -> None:
     """Record when ``df`` was downloaded and the exchange facts that came with it.
+
+    ``df`` is the frame as it sits in the price file. A late-close bar is
+    kept here and never written into that file, so prices cannot hold a
+    filled close without the record that says so.
 
     Written through a temporary file so a reader never sees half a document.
     The cache is a convenience: if it cannot be written the sidecar is removed
@@ -199,6 +247,7 @@ def _write_sidecar(meta_file: Path, df: pd.DataFrame, downloaded_at: pd.Timestam
         "downloaded_at": downloaded_at.isoformat(),
         "fingerprint": _fingerprint(df),
         "session": session,
+        "late_close": late_close,
     }
     tmp = meta_file.with_name(meta_file.name + ".tmp")
     try:
@@ -227,6 +276,10 @@ def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
     window failed and the prices are still minutes old).
     With nothing on disk, or when Yahoo says the symbol does not exist, the
     ``ValueError`` from ``fetch_prices`` propagates.
+
+    When Yahoo's daily row for the newest, finished session has no close yet,
+    the bar is completed with Yahoo's last regular-market price (see
+    ``_late_close_bar``) and returned in ``late_close`` so the caller says so.
     """
     now = _utc(now)
     start = DataConfig().start
@@ -273,9 +326,88 @@ def fetch_latest_prices(ticker: str, cache_dir: Path | str | None = None,
     # request below cannot leave them paired with the previous run's sidecar.
     _write_sidecar(meta_file, df, now, None)
     session = _fetch_session_info(ticker)
+    late_close = _late_close_bar(ticker, df, session, now)
     if session is not None:
-        _write_sidecar(meta_file, df, now, session)
-    return LatestPrices(df=df, downloaded_at=now, session=session)
+        _write_sidecar(meta_file, df, now, session, late_close)
+    if late_close is not None:
+        df = _with_late_close(df, late_close)
+    return LatestPrices(df=df, downloaded_at=now, session=session, late_close=late_close)
+
+
+def _late_close_bar(ticker: str, df: pd.DataFrame, session: dict | None,
+                    downloaded_at: pd.Timestamp) -> dict | None:
+    """The newest session's bar when Yahoo's daily history has no close for it yet.
+
+    Seen daily on London and Frankfurt shares: for many hours after the close
+    the newest daily row has open, high, low and volume but no close, while
+    the chart metadata already carries the last regular-market price. The
+    price loader drops the row, so the snapshot ends one session early.
+
+    Returns the bar as ``{"date", "open", "high", "low", "close", "volume"}``
+    with that price as its close, or None unless all of this holds: the last
+    trade is dated (exchange time) after the newest usable bar; that session
+    is over by the rules of ``_last_bar_is_partial``; the instrument is not a
+    cryptocurrency; Yahoo's unadjusted row for that date is its newest (an
+    empty row for a session not yet begun aside), follows the newest usable
+    bar with no row in between, empty or not, and lacks only the close; that
+    usable bar reads the same adjusted and unadjusted; and the price lies
+    within the row's low-to-high range. Otherwise nothing changes: the
+    snapshot ends at the newest usable bar and says it is a session behind.
+    """
+    if not session or session.get("instrument_type") == "CRYPTOCURRENCY":
+        return None
+    price = session.get("last_price")
+    if not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0:
+        return None
+    probe = LatestPrices(df=df, downloaded_at=downloaded_at, session=session)
+    traded = _last_trade_day(probe)
+    if traded is None or traded <= df.index[-1].date():
+        return None
+    day = pd.Timestamp(traded)
+    if _last_bar_is_partial(ticker, day, probe)[0] is not False:
+        return None  # still trading, or undecided: never filled
+    tail = _fetch_raw_tail(ticker, df.index[-1])
+    if tail is None:
+        return None
+    # Yahoo may already list the session about to open, with nothing in it.
+    # That row is overlooked. An empty row before the trade day stays: it is
+    # a missing session, and the checks below then refuse.
+    empty = (tail.isna() | (tail == 0)).all(axis=1)
+    tail = tail[~(empty & (tail.index > day))]
+    if len(tail) < 2 or tail.index[-1] != day or tail.index[-2] != df.index[-1]:
+        return None
+    before, bar = tail.iloc[-2], tail.iloc[-1]
+    # The raw row is unadjusted. It belongs in this adjusted series only if
+    # the bar before it reads the same in both; a dividend that is due or
+    # just applied breaks that, and the row is then left out as before. (A
+    # split cannot be seen here: Yahoo restates both closes for it together.)
+    if not math.isclose(before["close"], df["close"].iloc[-1], rel_tol=1e-6):
+        return None
+    if not pd.isna(bar["close"]):
+        return None
+    # yfinance writes a missing volume as 0, so a zero counts as missing.
+    rest = [float(bar[column]) for column in ("open", "high", "low", "volume")]
+    if not all(math.isfinite(value) and value > 0 for value in rest):
+        return None
+    low, high = float(bar["low"]), float(bar["high"])
+    if not low * (1 - _RANGE_TOLERANCE) <= price <= high * (1 + _RANGE_TOLERANCE):
+        return None
+    return {"date": f"{day:%Y-%m-%d}", "open": float(bar["open"]), "high": high,
+            "low": low, "close": float(price), "volume": float(bar["volume"])}
+
+
+def _with_late_close(df: pd.DataFrame, bar: dict) -> pd.DataFrame:
+    """``df`` with a late-close bar appended; raises when the record does not fit."""
+    day = pd.Timestamp(bar["date"])
+    values = {column: float(bar[column]) for column in _BAR_COLUMNS}
+    if day <= df.index[-1] or not all(math.isfinite(value) for value in values.values()):
+        raise ValueError("late-close record does not fit these prices")
+    index = pd.DatetimeIndex([day], name=df.index.name).astype(df.index.dtype)
+    row = pd.DataFrame(values, index=index)[list(df.columns)]
+    # yfinance names the column axis and the price table prints that name;
+    # a row without it would make concat drop it.
+    row.columns = df.columns
+    return pd.concat([df, row.astype(df.dtypes.to_dict())])
 
 
 def _last_bar_is_partial(ticker: str, as_of: pd.Timestamp,
@@ -471,8 +603,9 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
     masking. Each skipped, failed or incomplete input is recorded in ``notes``
     rather than silently dropped, and the notes that change how the data must
     be read (unfinished session, stale bar, prices that could not be
-    refreshed, incomplete fundamentals) are also written into the snapshot
-    itself so the agents see them.
+    refreshed, a close taken from the last regular-market price, incomplete
+    fundamentals) are also written into the snapshot itself so the agents
+    see them.
 
     ``prices`` (a finished download), ``df`` (a bare price frame, treated as
     downloaded at ``now``) and ``now`` exist for tests; by default prices are
@@ -601,6 +734,15 @@ def build_desk_snapshot(ticker: str, date: str | None = None, live: bool = True,
     session_notes: list[str] = []
     if not historical:
         behind = prices.refresh_failed
+        late = prices.late_close
+        if late and late.get("date") == f"{as_of:%Y-%m-%d}":
+            # A masked snapshot must not carry a real price level.
+            shown = "" if anonymize else f" ({float(late['close']):.10g})"
+            session_notes.append(
+                f"The close for {as_of:%Y-%m-%d} is Yahoo's last regular-market "
+                f"price{shown}, because Yahoo's daily bar for that session had no "
+                "close yet. The close Yahoo publishes later may differ slightly."
+            )
         traded = _last_trade_day(prices)
         if traded is not None and traded > as_of.date():
             # Yahoo sometimes returns the newest row with volume but no prices;

@@ -1,0 +1,105 @@
+name: Data source canary
+
+# Once a night the committed scripts ask the live data source for three symbols, and each
+# answer is put in one of four classes:
+#   ok       the data came and brief.py accepted it. A flag on the brief, such as
+#            prices_behind when the source has not published a finished session yet, is
+#            brief.py doing its job: the run is ok and the flags are shown. So is a run
+#            whose headline or statement request failed: the data line says "failed".
+#            BTC-USD is a coin, and only a company is asked for statements: its data line
+#            says statements=absent every night, which is not a change in the source
+#   refused  the source turned this network away (a refusal, or a rate limit that outlasted
+#            the one new attempt), could not be reached, or answered with an error of its
+#            own. That is not a fault in the scripts, so it is a notice and the job passes
+#   stopped  brief.py stopped on the day's data with one of its own sentences, such as a
+#            gap in the dates. A warning; the job passes
+#   changed  the answer no longer has the form the scripts read. The job fails
+# Nothing is stamped, built, committed or kept: the downloaded data is deleted with the
+# runner, and only counts, dates and codes are printed.
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: data-source-canary
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Preflight on the committed scripts
+        run: python skill/trading-agents-desk/scripts/brief.py --preflight skill/trading-agents-desk/scripts
+      - name: Ask for three symbols and build a brief from each
+        shell: python
+        run: |
+          import os
+          import subprocess
+          import sys
+          import tempfile
+
+          SCRIPTS = os.path.join("skill", "trading-agents-desk", "scripts")
+          SYMBOLS = ("NVDA", "SHEL.L", "BTC-USD")
+          REFUSED = ("E_REFUSED", "E_BUSY", "E_NO_ROUTE", "E_SERVER", "E_CERT")
+          # E_NOT_FOUND counts as changed here: these three symbols have been listed for years.
+          CHANGED = ("E_SHAPE", "E_NOT_FOUND", "E_INPUT")
+          LEVEL = {"ok": "::notice", "refused": "::notice", "stopped": "::warning",
+                   "changed": "::error"}
+
+
+          def run(script, *args):
+              p = subprocess.run([sys.executable, os.path.join(SCRIPTS, script)] + list(args),
+                                 capture_output=True, text=True, timeout=120)
+              out = p.stdout.strip().splitlines() or [""]
+              err = (p.stderr.strip().splitlines() or [""])[-1]
+              return p.returncode, out, err
+
+
+          def classify(symbol, folder):
+              bundle, brief = os.path.join(folder, "bundle.json"), os.path.join(folder, "brief.json")
+              code, out, err = run("get_data.py", symbol, bundle)
+              step, data_line = "get_data.py", out[-1]
+              if code == 0:
+                  step = "brief.py"
+                  code, out, err = run("brief.py", bundle, brief)
+              if code == 0:
+                  # The fact sheet names its flags on the line after "# Flags".
+                  flags = out[out.index("# Flags") + 1] if "# Flags" in out[:-1] else "none"
+                  return "ok", "%s / %s / flags: %s" % (data_line, out[-1], flags)
+              words = err.split()
+              stop = words[1] if code == 2 and len(words) > 1 and words[0] == "STOP" else ""
+              if step == "get_data.py" and stop in REFUSED:
+                  return "refused", err
+              if not stop or stop in CHANGED:
+                  return "changed", "%s exit %d: %s" % (step, code, err or "no message")
+              # A stop brief.py is built to make on the day's data, such as a gap in the dates.
+              return "stopped", err
+
+
+          rows, failed = [], False
+          with tempfile.TemporaryDirectory() as tmp:
+              for symbol in SYMBOLS:
+                  kind, detail = classify(symbol, tmp)
+                  rows.append((symbol, kind, detail))
+                  print("%s title=Canary %s %s::%s" % (LEVEL[kind], symbol, kind, detail))
+                  failed = failed or kind == "changed"
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as f:
+                  f.write("| Symbol | Class | Last line |\n|---|---|---|\n")
+                  for row in rows:
+                      f.write("| %s | %s | %s |\n" % tuple(x.replace("|", "/") for x in row))
+          if failed:
+              print("The data source's answer changed. See the lines above.")
+          sys.exit(1 if failed else 0)

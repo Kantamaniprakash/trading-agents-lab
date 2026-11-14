@@ -1,0 +1,4 @@
+# The skill's files ship with LF line endings, and each script carries a hash of its own
+# text and a size cap. Keep them LF in every checkout, so that a copy taken from a Windows
+# clone is byte for byte the copy inside dist/trading-agents-desk.zip.
+skill/trading-agents-desk/** text eol=lf
