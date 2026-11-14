@@ -1049,20 +1049,27 @@ def test_the_build_makes_no_network_request(monkeypatch, tmp_path):
 def test_the_listing_is_for_version_2_and_makes_no_measured_claim():
     text = LISTING.read_text(encoding="utf-8")
     assert "| Version | 2.0.0 |" in text
-    assert "Trading Agents Desk: Bull vs Bear, Every Figure From the Data" in text
+    assert "| Name | Trading Agents Desk: Bull and Bear Stock Analysis for a Second Opinion |" \
+        in text
+    # The listing is free: no price is left on the page, and nothing is sold on it.
+    assert "| Price | Free |" in text and "$5" not in text
     # The only percentages on the page are the two of the test the desk lost.
     assert set(re.findall(r"[-+]?\d+(?:\.\d+)?\s?%", text)) == {"-0.9%", "+15.7%"}
-    lowered = text.lower()
+    # As one line, so that a sentence is found wherever its lines break.
+    lowered = " ".join(text.lower().split())
     for phrase in ("pip install", "archive/refs", "git tag", "venv", "yfinance", "tradinglab ",
                    "catch rate", "accuracy", "outperform", "guaranteed returns"):
         assert phrase not in lowered, phrase
-    for needed in ("lost to buy-and-hold", "not investment advice", "not tested yet",
+    # The lost test stays on the page, in its own section and in the line the page carries.
+    assert "### The test this desk lost" in text
+    for needed in ("the desk design has one test on record, and it lost.",
+                   "lost to buy-and-hold", "not investment advice", "not tested yet",
                    "isn't this what my agent already does?", "what the receipt guarantees",
                    "what it does not", "query1.finance.yahoo.com",
                    "not affiliated with or endorsed by yahoo"):
         assert needed in lowered, needed
     questions = re.findall(r"(?m)^\*\*(.+\?)\*\*$", text)
-    assert questions and questions[0] == "Isn't this what my agent already does?"
+    assert questions[:2] == ["Is it really free?", "Isn't this what my agent already does?"]
     # The build commands it names are the ones the tool has.
     assert "python skill/build_skill.py --check" in text
 
@@ -1073,18 +1080,21 @@ def test_the_listing_describes_the_four_script_package_and_the_page_as_they_are(
     assert "four Python scripts" in flat and "The ZIP ships four scripts" in flat
     assert not re.search(r"(?i)(?<!other )\b(three|two|3|2) (Python )?scripts\b", flat)
     assert "The other three scripts cannot import a network module" in flat
-    # The table says what was run. No agent host is named as tested in it: a row about an
-    # agent or about a buyer's host says "not tested yet" or points at the release notes.
+    # The table says what was run. No agent host is named as tested in it: the row about an
+    # agent says what was run and names no host, and the row about a user's host says "not
+    # tested yet".
     table = text.split("What has been tried so far", 1)[1].split("### Limits", 1)[0]
     rows = dict(re.findall(r"(?m)^\| (.+?) \| (.+?) \|$", table))
     rows = {what: status for what, status in rows.items() if what not in ("What", "---")}
     assert len(rows) >= 5, rows
     for what, status in rows.items():
-        assert status.startswith(("tested", "not tested yet", "see the release notes")), what
-        if re.search(r"(?i)\bagent\b|\bhost\b|claude|codex|cursor", what):
+        assert status.startswith(("tested", "not tested yet", "run on ")), what
+        assert not re.search(r"(?i)claude|codex|cursor|chatgpt|gemini|copilot", what + status), what
+        if re.search(r"(?i)\bagent\b|\bhost\b", what):
             assert not status.startswith("tested"), what
-    assert any(re.search(r"(?i)\bagent\b", what) for what in rows)
-    assert rows["The page as a buyer's host shows it"].startswith("not tested yet")
+    (agent,) = [what for what in rows if re.search(r"(?i)\bagent\b", what)]
+    assert rows[agent].startswith("run on 2026-11-11, and no AI host is named as tested.")
+    assert rows["The page as a user's host shows it"].startswith("not tested yet")
     assert 'Rows change to "tested" only after a real run on that host.' in " ".join(
         table.split())
     # The page: optional, and described part by part in the order page.py draws it.

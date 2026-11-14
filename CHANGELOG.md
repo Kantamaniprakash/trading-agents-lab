@@ -199,6 +199,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session is widened, that the report can say "unfinished" for half an hour after the bell,
   that a fund, an index or a crypto pair is not asked for statements, and that the page
   carries the "not advice" line at its top.
+- Marketplace listing, 2026-11-14: the listing is free. It was paid, at $5 one-time, for its
+  first three days. The listing copy and the listing's name were rewritten for search:
+  `skill/LISTING.md` holds the new name, summary, tags and keywords, a "Pricing" section that
+  states the decision and its reasons, and the question "Is it really free?". The new file
+  `skill/listing-fields.json` holds the marketplace's other form fields. The table of what
+  has been tried says which build each run saw, and names no AI host as tested. Two
+  statements were corrected on the way: the approval before a charge for the marketplace's
+  price-history tool is the skill's instruction to the agent, not a marketplace prompt, and
+  the size of a paper trade is named as the one number the agent types. The tests check the
+  fields file: every field, the marketplace's limits, the one host, the lost test and the
+  words it must not hold. No change to the shipped scripts or instructions: the package is
+  still 2.0.0, byte for byte.
 
 ### Added
 - `tests/skill_v2/`: tests for the four scripts and the skill text on generated numbers, an

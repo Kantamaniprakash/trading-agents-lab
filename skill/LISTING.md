@@ -7,7 +7,7 @@ The design behind this copy is in [docs/skill-v2/DESIGN.md](../docs/skill-v2/DES
 ## Before you upload
 
 Version 2 installs nothing when it runs, so there is no release tag to create first. The ZIP
-holds the instructions and four Python scripts, and that is all a buyer's agent uses.
+holds the instructions and four Python scripts, and that is all a user's agent uses.
 
 1. Check the package without changing anything. It fails when a script was edited after its
    integrity stamp was written, when a known answer is not what the script computes, when
@@ -28,41 +28,50 @@ holds the instructions and four Python scripts, and that is all a buyer's agent 
 3. Run the skill from the ZIP once on every agent host you want to name in the table under
    "What it needs", and change the table to what you saw. A host nobody has run it on is not
    named as tested.
-4. Upload the ZIP and paste the fields below. Add screenshots only from real runs. Where the
-   marketplace asks which of its tools the skill may use, name
+4. Upload the ZIP and paste the fields: the short ones under "Form fields" below, the longer
+   ones from [`listing-fields.json`](listing-fields.json). Add screenshots only from real
+   runs. Where the marketplace asks which of its tools the skill may use, name
    `yahoo-finance:get_historical_data` and no other.
 
 For a later release: change the scripts or the text, run step 2, commit, upload. The marketplace
-reloads the skill for every buyer.
+reloads the skill for every user.
 
 ## Form fields
 
 | Field | Value |
 |---|---|
-| Name | Trading Agents Desk: Bull vs Bear, Every Figure From the Data |
+| Name | Trading Agents Desk: Bull and Bear Stock Analysis for a Second Opinion |
 | Skill id | `trading-agents-desk` |
 | Category | Trading & Investing |
 | Version | 2.0.0 |
-| Price | $5, one-time |
+| Price | Free |
 | License | MIT |
 | Docs URL | https://github.com/Kantamaniprakash/trading-agents-lab |
 
-**Summary (one line)**
+**Summary**
 
-A bull and a bear argue one ticker from the same dated market data, and a script, not the
-agent, puts every figure on the report. Research simulation, not investment advice. The desk
-design lost to buy-and-hold in its only test.
+Free stock analysis: a bull and bear debate and a paper BUY, SELL or HOLD view, as a second
+opinion on a stock, ETF, index or crypto pair. A research simulation, not investment advice; a
+script inserts the market figures in the report.
 
 **Tags**
 
-trading, stocks, investing, multi-agent, technical-analysis, market-data, research
+trading-investing, stock-analysis, technical-analysis, crypto, etf, bull-bear-case,
+second-opinion
 
 **Keywords**
 
-stock analysis, bull and bear case, second opinion, trading agents, multi-agent debate,
-risk review, checked figures, research simulation
+stock analysis, analyze a stock, bull and bear case, bull bear debate, stock second opinion,
+buy sell or hold, bitcoin technical analysis, crypto analysis, ETF analysis,
+stock research report
 
 ## Page copy
+
+The marketplace's form has more fields than the table above: description, use cases, usage
+example, compatibility note, known limitations, requirements, permissions, questions and a
+sample. The text for each of them is in [`listing-fields.json`](listing-fields.json), beside
+this file, with the name, summary, tags and keywords given above. The sections below are the
+long form of the same statements.
 
 ### The problem
 
@@ -113,8 +122,8 @@ through a model API on one stock for one quarter with the ticker and dates maske
 at all, and it cannot be: an agent that knows the ticker and the date may remember what
 happened next.
 
-That result is printed on every report. This skill sells two-sided reasoning you can check. It
-does not sell a prediction, a signal or an edge.
+That result is printed on every report. This skill offers two-sided reasoning you can check.
+It does not offer a prediction, a signal or an edge.
 
 ### What you get
 
@@ -181,12 +190,12 @@ What has been tried so far, and what has not:
 
 | What | Status |
 |---|---|
-| The four scripts: automated tests on generated data, the full suite, on Linux with Python 3.10, 3.11, 3.12 and 3.13, for the build before the last round of fixes | tested on 2026-11-11. The suite is run again on the final build |
-| The four scripts in CI on GitHub, for the pull request's commit before the two rounds of fixes: the preflight and the standard-library flow on Linux, macOS and Windows with Python 3.9, 3.13, 3.14 and 3.15 (12 legs; the Linux 3.9 leg runs on Ubuntu 24.04) | tested: all 12 legs passed. It is run again on the final commit |
+| The four scripts: automated tests on generated data, the full suite, for the final build, on Linux with Python 3.13 and, in CI on GitHub, with Python 3.10, 3.11 and 3.12 | tested: the suite of 2,596 tests passed with Python 3.13 on 2026-11-11, and the suite passed in CI with each of the other three versions |
+| The four scripts in CI on GitHub, for the final commit: the preflight and the standard-library flow on Linux, macOS and Windows with Python 3.9, 3.13, 3.14 and 3.15 (12 legs; the Linux 3.9 leg runs on Ubuntu 24.04) | tested: all 12 legs passed |
 | Live downloads from one Linux cloud machine on 2026-11-11, 18 symbols, with the build before the two rounds of fixes | tested once: 12 of the 18 were answered (11 with data, 1 with "no data for this symbol"). The source's rate limit turned the other 6 away within 20 minutes. That is why version 2 now waits once, asks once more and names the limit plainly |
 | The marketplace's price-history tool: a real saved result for one US share, read by `brief.py` | tested once on 2026-11-11 |
-| An agent following the skill from start to finish | see the release notes |
-| The page as a buyer's host shows it | not tested yet. It was looked at in one headless browser only |
+| An AI agent given only the skill files, following the skill from start to finish | run on 2026-11-11, and no AI host is named as tested. Four runs ended in a printed report: Nvidia and Shell on the build after the first round of fixes, Bitcoin and Apple on the build after the second round, each checked by an independent audit of every figure. The final build came one small fix later: one note sentence, three layout settings of the page and three sentences of the role briefs. From the saved data and drafts of the Bitcoin and the Apple run it prints the same two reports, byte for byte. The other runs made no report: one earlier Bitcoin run was stopped by a script fault that was then fixed, two were stopped by the AI host's own safety filter, and two stopped at the first step when the download was refused |
+| The page as a user's host shows it | not tested yet. It was looked at in one headless browser only |
 
 Rows change to "tested" only after a real run on that host.
 
@@ -255,7 +264,7 @@ What the receipt guarantees:
 - Every figure in the desk's part of the report is a figure from the run's data (the download,
   or the price file you supplied), with the sign, the percent mark and, for statement money,
   the currency the script gives it, inserted by code. The agent typed none of them: a draft
-  with a typed digit is refused.
+  with a typed digit is refused. The one exception is the size of a paper trade, named below.
 - In evidence lists and level rows, each figure stands under its own label, printed by the
   script.
 - A script copy that was damaged in copying stops the run. Three of the four scripts check
@@ -266,6 +275,8 @@ What the receipt guarantees:
 
 What it does not guarantee:
 
+- The size of a paper trade. It is the one number in the desk's view that is not from the
+  data: the desk's own judgment, typed by the agent and capped by code.
 - That the sentence around a figure is right, or that it names the right fact. "The trend is
   strong" next to a real figure is still the agent's sentence.
 - That a statement figure is recent. Each one is printed with its date where the script
@@ -291,6 +302,15 @@ What it does not guarantee:
 
 ### Questions
 
+**Is it really free?**
+
+Yes. The skill costs nothing, and its data needs no API key, account or subscription. Your
+agent's own model does the reasoning, so a run uses your agent's normal usage, and the desk's
+roles take many model turns. The only possible marketplace charge is its own optional
+price-history tool, about $0.07 per call. The skill tells your agent to offer it only when its
+command tool has no internet or the data source refuses, to ask you first and to use it only
+if you choose it. A price file that you supply costs nothing. The code is MIT licensed.
+
 **Isn't this what my agent already does?**
 
 Your agent can already write a bull case and a bear case. Left alone, it also types every
@@ -309,7 +329,8 @@ No. Its one test is on this page, and it lost. Read the output as a structured s
 No. Your agent's own model does the reasoning and your machine downloads the data. If the
 command tool has no internet or the source turns the download away, one option is the
 marketplace's own price-history tool, on a host that saves a tool's result as a file. It has
-a small per-use charge, about $0.07, that the marketplace shows you for approval first.
+a small per-use charge, about $0.07, and the skill tells your agent to start none before you
+have chosen it.
 
 **What does it put on my machine?**
 
@@ -344,8 +365,8 @@ saved report and prints `VERIFY ok` or the differences.
 
 Yes, under the MIT licence. The public repository holds the research lab the desk design
 comes from. Version 2 of the skill, these scripts and instructions, is there on a pull request
-branch until that request is merged, and on the main branch from then on. The listing sells
-the packaging.
+branch until that request is merged, and on the main branch from then on. The listing is free.
+What it adds is the packaging: the same files as one upload that a marketplace can load.
 
 **Why twelve roles?**
 
@@ -361,7 +382,7 @@ Fewer roles may come later, decided by experiment.
 | Network | One host, `query1.finance.yahoo.com`, from `get_data.py` only. Its User-Agent string holds the repository's address, which is never contacted. The other three scripts cannot import a network module, and the build checks that. |
 | File write | One new temporary folder per run. Nothing is written to the project folder. |
 | Environment variables | None are read by the scripts. Python's own network library follows the system's proxy settings when `get_data.py` runs. |
-| Marketplace tool | `yahoo-finance:get_historical_data`, the marketplace's price-history tool. Only when the command tool has no internet or the source refuses, and only when the user chooses it. The marketplace shows the price, about $0.07, for approval first. |
+| Marketplace tool | `yahoo-finance:get_historical_data`, the marketplace's price-history tool. Only when the command tool has no internet or the source refuses, and only when the user chooses it. The skill tells the agent to offer it as a choice with its charge, about $0.07 per call, and to wait for the user's answer. |
 
 The ZIP ships four scripts, written as plain readable Python. The instructions tell the agent
 to copy them unchanged, and a copy that was changed on the way stops with an integrity error.
@@ -369,18 +390,26 @@ That check catches a copying error. It is not protection against a change made o
 
 ## Pricing
 
-Start at **$5, one-time**. Starting paid is the reversible choice: a paid listing can be made
-free later and past buyers keep access, while a free listing that turns paid locks existing
-users out until they buy.
+**Free since 2026-11-14.** Before that the listing was paid for three days, at 5 US dollars,
+one-time.
 
-The plan in the design: keep $5 for 30 days after the comparison in phase 2 is published, then
-make the listing free if fewer than five copies sold.
+Why: in the week of the decision, every one of the 15 most used skills on this marketplace was
+free, and nearly every paid stock listing had no uses. In its three days as a paid listing
+this one had 6 views and no use. A free listing also carries less of the data-terms risk named
+in the note for the seller below.
 
-Do not price or describe it as a signal product. The repository is public and MIT licensed, so
-the listing sells packaging, and the one published result does not support a claim of trading
-edge. Paid skills carry a money-back promise for a skill that does not do what its page says,
-which is one more reason this page promises only what the scripts do. Check the marketplace's
-current creator terms for the revenue split before you set the price.
+What stays true:
+
+- The only possible marketplace charge is the marketplace's own optional price-history tool,
+  about $0.07 per call. The skill tells the agent to start none before the user has chosen
+  it, each time. That approval is the skill's instruction to the agent. As the marketplace's
+  connector describes itself on 2026-11-14, it runs a tool without a question of its own
+  while the user's balance covers the price, unless the user has chosen to approve each use.
+- A free listing that turns paid later locks existing users out until they buy. Do not flip it
+  back lightly.
+- Do not describe it as a signal product. The repository is public and MIT licensed, and the
+  one published result does not support a claim of trading edge. This page promises only what
+  the scripts do.
 
 ## Note for the seller, not listing text: the data provider's terms
 
@@ -390,11 +419,13 @@ This section is for the person who lists the skill. None of it goes on the listi
 a User-Agent that names this project, no cookies and no login step. These endpoints are
 unofficial. The skill is not affiliated with, endorsed or vetted by Yahoo.
 
-The skill redistributes no data: each buyer's own machine downloads it for that buyer's own
+The skill redistributes no data: each user's own machine downloads it for that user's own
 use, and the tests in this repository hold generated numbers only. Even so, a paid listing is
 a commercial product at any price, and Yahoo's terms do not clearly allow one to be built on
-this data. This is the weakest point of a paid listing. Read the terms, or move to a licensed
-source, before taking payment. A free listing carries less of this risk.
+this data. This is the weakest point of a paid listing. The listing is free since 2026-11-14.
+A free listing carries less of this risk, and it does not remove it: the endpoints are still
+unofficial, and the listing still stands on a commercial marketplace. Read the terms, or move
+to a licensed source, before taking payment again.
 
 ## What this page must not say
 

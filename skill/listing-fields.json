@@ -1,0 +1,100 @@
+{
+ "name": "Trading Agents Desk: Bull and Bear Stock Analysis for a Second Opinion",
+ "summary": "Free stock analysis: a bull and bear debate and a paper BUY, SELL or HOLD view, as a second opinion on a stock, ETF, index or crypto pair. A research simulation, not investment advice; a script inserts the market figures in the report.",
+ "description": "**Free stock analysis for one ticker: the bull and bear case side by side, a paper BUY, SELL or HOLD view with a size, and the price levels that would change it.**\n\nFor stocks, ETFs, indexes and crypto pairs such as bitcoin (BTC-USD). Nothing is installed and no API key is needed.\n\nIn the report, your agent never types a market number in digits: a script inserts every market figure from the data of that run. It is a research simulation, not investment advice, and this desk design lost to buy-and-hold in its only test.\n\nSay \"analyze NVDA\" or \"give me the bull and bear case for AAPL\". Ask \"should I buy this stock?\" and you get a simulated trading desk's second opinion, not advice.\n\n## What you get\n\n- Which side won the argument and why, with the claim, best evidence and weak point of each case.\n- The paper desk's BUY, SELL or HOLD with a size. HOLD means no trade.\n- One to three price levels that would change the view, the risk review, data notes and a receipt that counts the inserted figures.\n- The same report as an HTML page with a price chart, when your agent's host can show or save a file or when you ask.\n\n## How it runs\n\n1. A script downloads a year of daily prices, recent headlines and, for a company, a few statement figures from one host, `query1.finance.yahoo.com`.\n2. A second script computes about 130 named facts for a company (about 120 for an ETF, index or crypto pair): recent prices, technical analysis indicators such as RSI, MACD and Bollinger bands, moving averages, returns and statement ratios.\n3. Your agent runs up to twelve desk roles: analysts, a bull and a bear researcher who debate, a trader, risk analysts and a fund manager who can cut or reject the trade.\n4. A third script refuses a draft with a typed digit, an unknown fact or a listed advice phrase, then prints the report.\n\n## The honest part\n\n- **It lost its only test.** A reduced, price-only version of this desk design returned -0.9% against +15.7% for buy-and-hold: one stock, one quarter. Every report prints it.\n- **Not advice, not a signal and not a prediction.** It never trades and takes no personal inputs.\n- **Free.** The one possible marketplace charge is optional: its price-history tool, about $0.07 per call, when your agent's command tool has no internet or the source refuses, and only if you choose it: your agent is told to ask first.\n- The data source is unofficial and can limit requests; the run then stops and says so. An AI host may decline to run the roles.\n- An independent reimplementation of the multi-agent TradingAgents paper design (Xiao et al., arXiv:2412.20138).",
+ "tags": [
+  "trading-investing",
+  "stock-analysis",
+  "technical-analysis",
+  "crypto",
+  "etf",
+  "bull-bear-case",
+  "second-opinion"
+ ],
+ "keywords": [
+  "stock analysis",
+  "analyze a stock",
+  "bull and bear case",
+  "bull bear debate",
+  "stock second opinion",
+  "buy sell or hold",
+  "bitcoin technical analysis",
+  "crypto analysis",
+  "ETF analysis",
+  "stock research report"
+ ],
+ "use_cases": [
+  "Run a stock analysis on one ticker, for example \"analyze NVDA\", and get a paper BUY, SELL or HOLD view with the reasons.",
+  "Analyze a stock in a multi-agent debate (separate sub-agents where your agent's host has them, otherwise one model taking each role in turn) and read the bull and bear case side by side, with the weak point of each.",
+  "Get a second opinion on a stock when you wonder \"should I buy this stock?\", as a research simulation and not as advice.",
+  "Run technical analysis on Bitcoin or another crypto pair, with indicators such as RSI, MACD and Bollinger bands computed by code.",
+  "Run an ETF analysis or check an index, and get a research report with the price levels that would change the view and a receipt for the figures."
+ ],
+ "usage_example": "Say \"Analyze NVDA\" or \"Give me the bull and bear case for AAPL\". Your agent says that it will run a few short Python commands, gets the data, runs the desk roles that the data supports and shows the printed report. Then ask for the page or the full debate (unchecked notes). The view is a paper desk's, not advice.",
+ "compatibility_note": "Needs an AI agent that can run terminal commands and write files, and Python 3.9 or newer. Standard library only: nothing is installed. Covers stocks, ETFs, indexes and crypto pairs. The HTML page with the chart needs a host that can show or save a file. This page names no AI host as tested.",
+ "known_limitations": "Research simulation: not investment advice, not a signal, not a prediction. The desk design lost its only test: -0.9% against +15.7% for buy-and-hold (a reduced, price-only version, one stock, one quarter). The packaged skill has not been backtested. It never trades and takes no holdings or goals. One ticker per run, on one year of daily prices: no options, futures, currency pairs or intraday data. The data source is unofficial. It can refuse a network and limits requests from shared cloud networks; the run then stops and says so. In an unfinished trading day the newest price is not final. An AI host may decline to run the roles; then no report is made. The decision is a language model's judgment: a second run can give another size or, near neutral, another action. Without subagents, one model plays every role in one context. Up to twelve roles take many model turns. The report is in English. Not affiliated with or endorsed by Yahoo.",
+ "requirements": [
+  "Python 3.9+",
+  "Terminal",
+  "Web access or a price file"
+ ],
+ "optional_requirements": [],
+ "requirement_note": "Nothing is installed: four standard-library Python scripts run in one temporary folder. Web access means one host, query1.finance.yahoo.com, with no key and no account. Without it, supply a price file (date, open, high, low, close, volume; 60 daily rows or more); the report then has prices only.",
+ "permissions": {
+  "hosts": [
+   "query1.finance.yahoo.com"
+  ],
+  "tools": [
+   "bash"
+  ],
+  "file_scopes": [
+   "One new folder per run in the system temp directory, named desk-* (read and write)",
+   "A price file or saved price history you supply, if any (read only)"
+  ],
+  "notes": "Bash runs Python: a version check, a command that makes a temporary folder, the scripts, and a command that removes that folder only if its name starts with desk- and it holds brief.py. A command may copy the scripts into it. Only get_data.py uses the network, and only this host. The scripts read no environment variable; Python's network library follows the system proxy settings. The instructions forbid brokerage, order and account tools. Optional marketplace price-history tool: see the FAQ."
+ },
+ "faq": [
+  {
+   "question": "Is it really free?",
+   "answer": "Yes. The skill costs nothing, and its data needs no API key, account or subscription. Your agent's own model does the reasoning, so a run uses your agent's normal usage, and the desk's roles take many model turns. The only possible marketplace charge is its own optional price-history tool, about $0.07 per call. The skill tells your agent to offer it only when its command tool has no internet or the data source refuses, to ask you first and to use it only if you choose it. A price file that you supply costs nothing. The code is MIT licensed."
+  },
+  {
+   "question": "Should I buy this stock? Can it tell me?",
+   "answer": "No. It gives you a second opinion from a simulated desk: which side won the bull and bear argument, and a paper BUY, SELL or HOLD with the reasons. It knows nothing about your holdings, goals or risk tolerance. It never trades: its instructions forbid brokerage, order, account, watchlist and alert tools, even to read a quote. It is not investment advice."
+  },
+  {
+   "question": "Does it predict prices?",
+   "answer": "No. The desk design has one test on record, and it lost: a reduced, price-only version returned -0.9% against +15.7% for buy-and-hold, on one stock for one quarter. The skill as packaged has not been backtested. Read the report as a structured second opinion. It is not advice, not a signal and not a prediction."
+  },
+  {
+   "question": "Does it need an API key?",
+   "answer": "No. The data needs no key, no account and no subscription. One script downloads the data from query1.finance.yahoo.com, and your agent's own model does the reasoning."
+  },
+  {
+   "question": "What does it put on my machine?",
+   "answer": "Nothing is installed. Each run uses one new temporary folder that holds the scripts, the downloaded data, the fact sheet, the draft, the report and, when it is drawn, the page. Your agent asks whether to keep the folder and removes it when you do not want it. The folder is made where your agent's commands run, which can be a cloud sandbox and not your own computer."
+  },
+  {
+   "question": "Does it work for crypto and ETFs?",
+   "answer": "Yes. It covers stocks, funds such as ETFs, indexes and crypto pairs such as BTC-USD, on daily data. An ETF, an index or a crypto pair has no company statements, so the report says they are absent and the desk runs without the fundamentals analyst. When no headlines come with the data, the news and sentiment analysts are skipped too. For a crypto pair the current day is never finished, so the newest price is not final. Options, futures, currency pairs and intraday data are not covered."
+  },
+  {
+   "question": "What technical analysis does it include?",
+   "answer": "A script computes RSI, MACD, Bollinger bands, ATR, ADX, stochastic, CCI, MFI, moving-average gaps, returns, the 52-week high and low close and volume figures from one year of daily prices. The desk cites these facts by name, and the script prints each value. On a short price history the 200-day and 52-week facts are absent, and the report says so. This is daily data, and the source's quotes can be delayed."
+  },
+  {
+   "question": "How is this different from asking my agent to analyze a stock?",
+   "answer": "Your agent can already write a bull case and a bear case. Left alone, it also types every figure in them, and you cannot tell a computed figure from a remembered one. Here a script downloads the data during the run and inserts the figures, a draft with a typed digit is sent back, the risk review can shrink a trade and never enlarge it, and every report states that this desk design lost its only test. Without sub-agents, one model plays every role in turn in one context. The sample report on this page ran that way, and every report says how its roles ran. If all you want is an opinion, you do not need this skill."
+  },
+  {
+   "question": "What does the receipt guarantee, and what not?",
+   "answer": "It guarantees that every figure in the desk's part of the report is a figure from that run's data, with its sign and unit, inserted by code, and it says how many there are. It does not guarantee that the sentence around a figure is right, that the desk chose the facts that matter, that the source's data is right, or that the view is any good. One number in the desk's view is not from the data: the size of a paper trade. It is the desk's own judgment, typed by your agent and capped by code. Number words such as \"half\" or \"thirty\" are counted, not checked, and \"one\" and fractions in words are not counted at all. The receipt covers the printed report: not the HTML page, and not the full debate, which is your agent's own notes with figures that no script checks. The script cannot control what your agent displays: the skill tells it to show the printed report unchanged. While you keep the run's folder, one command checks a saved report against its data and prints VERIFY ok or the differences."
+  },
+  {
+   "question": "What if the data source refuses?",
+   "answer": "The run stops and shows a fixed sentence that says the fault is at the source and not with the ticker. The source is unofficial and limits requests from shared cloud networks. After a rate limit the script has already waited once and asked once more, and a later run may work. After a refusal, waiting rarely helps. You can then supply a price file or, on a host that saves a tool's result as a file, choose the marketplace's price-history tool: about $0.07 per call, which your agent is told to use only after you choose it, and not for listings in Australia or New Zealand. Either way the report has prices only, with no headlines and no statement figures. The skill does not switch to another source by itself."
+  }
+ ],
+ "sample_input": "Analyze AAPL and give me the bull and bear case.",
+ "sample_output": "## AAPL &#183; Apple Inc.\n\nDesk view at the 2026-11-11 last price &#183; **354.58 USD** &#183; data fetched 2026-11-11 17:54 UTC\n\nResearch simulation, not advice. This desk design lost to buy-and-hold in its only test.\n\n| The argument | The paper desk |\n| --- | --- |\n| **Neither side won** | **No trade** (HOLD) |\n\n**Why.** The price is 2.67% above its short-term average, 4.95% above its medium-term average and 18.09% above its long-term average, so the direction is up. But the session is unfinished, the price is stretched, with Bollinger %B(20,2) 1.01 and Stochastic %K(14) 97.34, and ADX(14) 17.39 shows a trend with little strength. Neither side has a trigger for the next few trading days.\n\n|  | Bull | Bear |\n| --- | --- | --- |\n| **Core claim** | The trend is up at every horizon, momentum is positive and the price is back at its highest level of the past year. | The price is stretched at the top of its recent range in an unfinished session, and the trend behind it has little measured strength, so a pullback is the greater near-term risk. |\n| **Best evidence** | last price against the 50-day average +4.95% &#183; last price against the 200-day average +18.09% &#183; MACD histogram 0.4099 &#183; 63-day return +16.16% &#183; last price against the 52-week high +0.00% | Stochastic %K(14) 97.34 &#183; Stochastic J 119.43 &#183; CCI(20) 159.38 &#183; Bollinger %B(20,2) 1.01 &#183; ADX(14) 17.39 |\n| **Also** | The business is growing with high profitability, with revenue, newest quarter against a year earlier +11.72% (as of 2026-09-30), net income, newest quarter against a year earlier +11.81% (as of 2026-09-30) and net margin, trailing 12 months 27.60% (as of 2026-09-30), and a headline reports product optimism: \"Why the iPhone Duo Could Kick Off a &#8216;New Decade&#8217; for Apple\" (Barrons.com, 2026-11-11). | The shares look expensive for their growth, with trailing P/E 39.05 (as of 2026-11-09) and PEG ratio 2.83 (as of 2026-11-09), which rests on analyst estimates, and a headline reports cost pressure: \"Apple Slides 4% as Ternus Calls Memory Pricing 'Unprecedented' Despite a Record $114.5 Billion Quarter\" (TIKR, 2026-11-11). |\n| **Weak point** | The bull conceded that the new high comes in an unfinished session without volume confirmation, and that ADX(14) 17.39 shows little trend strength. | The bear conceded that the direction is up at every horizon and that there is no trigger for a short: the bear case argues for staying out, not for a short. |\n\n**What would change this view**\n\n| Level | Price | To reach it | Would support |\n| --- | --- | --- | --- |\n| high on 2026-11-05 | 355.38 | +0.2% | Bull, on a finished close above, with volume heavier than the recent average |\n| close on 2026-11-06 | 342.37 | -3.4% | Bear, on a finished close below |\n\n**Risk review.** The risky analyst argued that staying out passes up an uptrend with the price 18.09% above its long-term average. The safe analyst pointed to Bollinger %B(20,2) 1.01, Stochastic J 119.43 and ATR(14) as a share of the last price 2.43% in a session that is not final. The neutral analyst said that a finished session above the earlier peak, high on 2026-11-05 355.38, with heavier volume would settle it. The fund manager approved the hold: no trade.\n\n---\n\n**Receipts**\n\n- Figures: 31 inserted by code from the data. Quantity words: 0, not checked.\n- Data 599ca5f0 to 2026-11-11, unfinished. Report 0a9061a4. Attempt 1. Script 2.0.0.\n- This covers sourcing and arithmetic, not judgment.\n- Test record: This desk design returned -0.9% against +15.7% for buy-and-hold in its only test: a reduced, price-only version on one stock for one quarter.\n- Research output, not investment advice. This is a simulated analysis on public data; nothing here places orders. Not affiliated with or endorsed by Yahoo; use of the data is subject to Yahoo's terms.\n\n(shortened)"
+}

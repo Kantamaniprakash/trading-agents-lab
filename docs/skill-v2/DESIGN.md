@@ -202,4 +202,4 @@ it, so fixes no longer need a release tag.
 | The buyer's host has no internet from its code tool | The price-file route, and a host table on the listing that says what was tested |
 | An agent copies a script wrongly | Self-hash and known-answer tests stop the run |
 | The stamp lends a weak view more authority than it deserves | The receipt says in fixed words what is and is not guaranteed, and the test the desk lost is on every report |
-| The listing still sells nothing | $5 for 30 days after the proof is live, then free if fewer than five sales |
+| The listing still sells nothing | Decided on 2026-11-14: the listing is free since that day. In three days at $5 it had 6 views and no use, and every one of the 15 most used skills on the marketplace that week was free |

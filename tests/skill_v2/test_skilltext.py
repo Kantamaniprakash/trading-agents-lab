@@ -1,5 +1,6 @@
 """Tests for the skill's instruction text: SKILL.md, references/roles.md, references/lab.md,
-and for the two texts written around it, docs/skill-v2/CONTRACTS.md and skill/LISTING.md.
+and for the texts written around it: docs/skill-v2/CONTRACTS.md, skill/LISTING.md and the
+marketplace's form fields in skill/listing-fields.json.
 
 The text is checked against docs/skill-v2/CONTRACTS.md and against what the four shipped
 scripts really print. Some tests run the scripts with the commands exactly as SKILL.md prints
@@ -38,6 +39,9 @@ SKILL_MD = SKILL / "SKILL.md"
 ROLES_MD = SKILL / "references" / "roles.md"
 LAB_MD = SKILL / "references" / "lab.md"
 MARKDOWN = (SKILL_MD, ROLES_MD, LAB_MD)
+# The marketplace's form fields, as they are pasted: the listing's text beside LISTING.md.
+LISTING_FIELDS = ROOT / "skill" / "listing-fields.json"
+DESIGN = ROOT / "docs" / "skill-v2" / "DESIGN.md"
 
 REPO_URL = "https://github.com/Kantamaniprakash/trading-agents-lab"
 HOST = "query1.finance.yahoo.com"
@@ -2774,7 +2778,7 @@ def test_the_contract_is_at_rev_6_and_lists_the_known_limits():
               '"unfinished" also covers the half hour after the bell')
     assert [x[:len(start)] for x, start in zip(limits, starts)] == list(starts)
     assert len(limits) == len(starts) == 13
-    # What a buyer can meet of these stands under Limits in the listing too, in plain words.
+    # What a user can meet of these stands under Limits in the listing too, in plain words.
     page = " ".join(section(text_of(LISTING), "Limits", "###").split())
     for said in ("guillemets or with two apostrophes", "trusts the fixed texts",
                  "single row stamped late in the UTC day", "time stamps written as text",
@@ -2789,6 +2793,11 @@ def test_the_contract_is_at_rev_6_and_lists_the_known_limits():
 
 # The listing
 
+# Product and company names of AI hosts. The listing names none, as tested or otherwise.
+AI_HOSTS = (r"(?i)\b(?:Claude|Codex|Cursor|ChatGPT|GPT|OpenAI|Anthropic|Gemini|Copilot|Windsurf|"
+            r"Cline|Aider)\b")
+
+
 def listing_table(start: str, end: str) -> dict[str, str]:
     """The rows of the listing's two-column table between two pieces of its text."""
     return dict(re.findall(r"(?m)^\| (.+?) \| (.+?) \|$",
@@ -2799,11 +2808,18 @@ def test_the_listing_table_says_what_was_tried_and_claims_no_agent_host():
     rows = listing_table("What has been tried so far", "Rows change to")
     assert rows.pop("What") == "Status" and len(rows) == 6
     suite, ci, live, tool, agent, page = rows.items()
-    assert "automated tests on generated data, the full suite" in suite[0]
-    assert "on Linux with Python 3.10, 3.11, 3.12 and 3.13" in suite[0]
-    # Two rounds of fixes came after the runs on record, and each row says which build it saw.
-    assert suite[0].endswith(", for the build before the last round of fixes")
-    assert suite[1] == "tested on 2026-11-11. The suite is run again on the final build"
+    # The suite row names the Pythons of the CI job that runs the suite, and the one more
+    # that it was run with on the final build.
+    job = text_of(CI_YML).split("\n  test:\n", 1)[1].split("\n  skill-scripts:\n", 1)[0]
+    versions = re.findall(r'"([\d.]+)"', re.search(r"(?m)^\s+python-version: \[(.+)\]$",
+                                                   job).group(1))
+    assert versions == ["3.10", "3.11", "3.12"] and "uv run pytest tests/ -q" in job
+    assert suite[0] == ("The four scripts: automated tests on generated data, the full suite, "
+                        "for the final build, on Linux with Python 3.13 and, in CI on GitHub, "
+                        "with Python 3.10, 3.11 and 3.12")
+    assert suite[1] == ("tested: the suite of 2,596 tests passed with Python 3.13 on "
+                        "2026-11-11, and the suite passed in CI with each of the other three "
+                        "versions")
     # The CI row names the legs that the workflow really has.
     job = text_of(CI_YML).split("\n  skill-scripts:\n", 1)[1]
     systems = re.search(r"(?m)^\s+os: \[(.+)\]$", job).group(1).split(", ")
@@ -2811,13 +2827,14 @@ def test_the_listing_table_says_what_was_tried_and_claims_no_agent_host():
                                                    job).group(1))
     assert systems == ["ubuntu-latest", "macos-latest", "windows-latest"]
     assert versions == ["3.9", "3.13", "3.14", "3.15"] and "- os: ubuntu-24.04" in job
-    for phrase in ("in CI on GitHub", "the pull request's commit before the two rounds of fixes",
+    for phrase in ("in CI on GitHub, for the final commit:",
                    "the preflight and the standard-library flow",
                    "on Linux, macOS and Windows with Python 3.9, 3.13, 3.14 and 3.15",
                    "(%d legs; the Linux 3.9 leg runs on Ubuntu 24.04)"
                    % (len(systems) * len(versions))):
         assert phrase in ci[0], phrase
-    assert ci[1] == "tested: all 12 legs passed. It is run again on the final commit"
+    assert ci[1] == "tested: all 12 legs passed"
+    # The live downloads were not repeated: that row still says which build it saw.
     assert live[0] == ("Live downloads from one Linux cloud machine on 2026-11-11, 18 symbols, "
                        "with the build before the two rounds of fixes")
     for phrase in ("12 of the 18 were answered", "11 with data",
@@ -2826,16 +2843,39 @@ def test_the_listing_table_says_what_was_tried_and_claims_no_agent_host():
         assert phrase in live[1], phrase
     assert "a real saved result for one US share" in tool[0]
     assert tool[1] == "tested once on 2026-11-11"
-    # No agent host is named as tested: the release notes say what the agent runs showed.
-    assert agent == ("An agent following the skill from start to finish",
-                     "see the release notes")
-    assert page[1].startswith("not tested yet")
+    # The agent runs: which build each saw and how each ended. The row carries no "tested"
+    # mark and names no AI host: it says what was run.
+    assert agent[0] == ("An AI agent given only the skill files, following the skill from "
+                        "start to finish")
+    assert agent[1].startswith("run on 2026-11-11, and no AI host is named as tested. ")
+    for phrase in ("Four runs ended in a printed report: Nvidia and Shell on the build after "
+                   "the first round of fixes, Bitcoin and Apple on the build after the second "
+                   "round, each checked by an independent audit of every figure.",
+                   "The final build came one small fix later: one note sentence, three layout "
+                   "settings of the page and three sentences of the role briefs.",
+                   "From the saved data and drafts of the Bitcoin and the Apple run it prints "
+                   "the same two reports, byte for byte.",
+                   "The other runs made no report: one earlier Bitcoin run was stopped by a "
+                   "script fault that was then fixed, two were stopped by the AI host's own "
+                   "safety filter, and two stopped at the first step when the download was "
+                   "refused"):
+        assert phrase in agent[1], phrase
+    assert page == ("The page as a user's host shows it",
+                    "not tested yet. It was looked at in one headless browser only")
     for what, status in rows.items():
-        assert not re.search(r"Claude|Codex|Cursor", what + status), what
-        assert what == agent[0] or status.startswith(("tested", "not tested yet")), what
+        assert not re.search(AI_HOSTS, what + status), what
+        assert "run again" not in status and "release notes" not in status, what
+        if what == agent[0]:
+            continue
+        assert status.startswith(("tested", "not tested yet")), what
+        # A row about somebody's host is marked "tested" only after a real run on that host.
+        assert not (re.search(r"(?i)\bhost\b", what) and status.startswith("tested")), what
     flat_page = flat(LISTING)
+    assert 'Rows change to "tested" only after a real run on that host.' in flat_page
     assert "The table below says which versions and systems have been run." in flat_page
     assert "3.14 and newer have not" not in flat_page
+    # No AI host is named anywhere in the listing's text.
+    assert not re.search(AI_HOSTS, text_of(LISTING))
 
 
 def test_the_listing_gives_the_right_way_forward_after_a_refusal_or_a_rate_limit():
@@ -2874,10 +2914,20 @@ def test_the_listing_declares_the_marketplace_tool_and_the_two_one_line_commands
     for phrase in ("`yahoo-finance:get_historical_data`",
                    "Only when the command tool has no internet or the source refuses, and only "
                    "when the user chooses it.",
-                   "The marketplace shows the price, about $0.07, for approval first."):
+                   "The skill tells the agent to offer it as a choice with its charge, about "
+                   "$0.07 per call, and to wait for the user's answer."):
         assert phrase in tool, phrase
     assert "`yahoo-finance:get_historical_data`" in roles and "about $0.07" in roles
+    # The approval is the skill's instruction: offer the choice with its charge, and wait.
+    choices = section(text_of(SKILL_MD), "Step 1").split("### ")[1]
+    assert "Offer the choices named for the stop, keep `DIR` and wait." in choices
+    assert ("3. The marketplace's price-history tool, for a small charge that the user "
+            "approves first") in choices
     page = flat(LISTING)
+    # The listing does not promise a prompt by the marketplace: its connector may run a tool
+    # without a question of its own while the user's balance covers the price.
+    assert "marketplace shows" not in page
+    assert ("the skill tells your agent to start none before you have chosen it" in page)
     assert ("This route was tried once, on 2026-11-11, with a real saved result for one US "
             "share.") in page
     assert "on a host that saves a tool's result as a file" in page
@@ -2897,7 +2947,7 @@ def test_the_listing_declares_the_marketplace_tool_and_the_two_one_line_commands
     assert "The address in it is text: it is never contacted." in flat(CONTRACTS)
 
 
-def test_the_listing_states_the_costs_and_limits_a_buyer_meets():
+def test_the_listing_states_the_costs_and_limits_a_user_meets():
     limits = " ".join(section(text_of(LISTING), "Limits", "###").split())
     # The scripts an agent may have to write out, by their real size.
     said = re.search(r"the agent may have to write the four scripts out, about (\d+) KB of "
@@ -2917,8 +2967,8 @@ def test_the_listing_states_the_costs_and_limits_a_buyer_meets():
             "branch until that request is merged, and on the main branch from then on."
             ) in page
     assert "The scripts and the instructions are in the public repository" not in page
-    # The price stands, and nothing on the page is a measured claim.
-    assert "| Price | $5, one-time |" in text_of(LISTING)
+    # The listing is free, and nothing on the page is a measured claim.
+    assert "| Price | Free |" in text_of(LISTING)
     assert set(re.findall(r"[-+]?\d+(?:\.\d+)?\s?%", page)) == {"-0.9%", "+15.7%"}
 
 
@@ -2936,6 +2986,233 @@ def test_the_note_on_the_data_providers_terms_is_marked_as_a_note_for_the_seller
                    "a paid listing is a commercial product at any price, and Yahoo's terms do "
                    "not clearly allow one to be built on this data",
                    "This is the weakest point of a paid listing.",
-                   "Read the terms, or move to a licensed source, before taking payment.",
-                   "A free listing carries less of this risk."):
+                   # Free lowers the risk and does not remove it.
+                   "The listing is free since 2026-11-14.",
+                   "A free listing carries less of this risk, and it does not remove it: the "
+                   "endpoints are still unofficial, and the listing still stands on a "
+                   "commercial marketplace.",
+                   "Read the terms, or move to a licensed source, before taking payment "
+                   "again."):
         assert phrase in note, phrase
+    assert "buyer" not in note
+
+
+# The listing is free since 2026-11-14, and its form fields are in a file beside LISTING.md
+
+FIELD_KEYS = ("name", "summary", "description", "tags", "keywords", "use_cases",
+              "usage_example", "compatibility_note", "known_limitations", "requirements",
+              "optional_requirements", "requirement_note", "permissions", "faq", "sample_input",
+              "sample_output")
+# The marketplace's limits, in characters.
+FIELD_LIMITS = {"name": 70, "summary": 240, "description": 2600, "usage_example": 320,
+                "compatibility_note": 300, "known_limitations": 950, "requirement_note": 300}
+# Words that promise what this skill cannot keep, as lower-case substrings.
+FORBIDDEN = ("guarantee", "real-time", "predicts", "profit")
+# The only sentences of the fields that may hold one of them, word for word. The first three
+# say what the receipt covers and what it does not. The last is a sentence of the sample
+# report about a company's business ("profitability"): it says nothing about the skill.
+ALLOWED = (
+    "What does the receipt guarantee, and what not?",
+    "It guarantees that every figure in the desk's part of the report is a figure from that "
+    "run's data, with its sign and unit, inserted by code, and it says how many there are.",
+    "It does not guarantee that the sentence around a figure is right, that the desk chose the "
+    "facts that matter, that the source's data is right, or that the view is any good.",
+    "The business is growing with high profitability, with revenue, newest quarter against a "
+    "year earlier +11.72% (as of 2026-09-30), net income, newest quarter against a year "
+    "earlier +11.81% (as of 2026-09-30) and net margin, trailing 12 months 27.60% (as of "
+    "2026-09-30), and a headline reports product optimism: \"Why the iPhone Duo Could Kick "
+    "Off a &#8216;New Decade&#8217; for Apple\" (Barrons.com, 2026-11-11).",
+)
+PERCENT = r"[-+]?\d+(?:\.\d+)?\s?%"
+DOLLARS = r"\$\d+(?:\.\d+)?"
+
+
+def listing_fields() -> dict:
+    return json.loads(text_of(LISTING_FIELDS))
+
+
+def strings(value) -> list[str]:
+    """Every string in a JSON value, the keys of its objects included."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for key, inner in value.items() for s in [key] + strings(inner)]
+    if isinstance(value, list):
+        return [s for inner in value for s in strings(inner)]
+    return []
+
+
+def test_the_listing_is_free_and_says_why():
+    text, page = text_of(LISTING), flat(LISTING)
+    assert listing_table("## Form fields", "**Summary**")["Price"] == "Free"
+    # No price of the paid listing is left. The one amount of money on the page is the charge
+    # of the marketplace's own tool.
+    assert "$5" not in text and set(re.findall(DOLLARS, text)) == {"$0.07"}
+    for gone in ("sells", "buyer", "money-back", "revenue split", "30 days", "fewer than five"):
+        assert gone not in page, gone
+    pricing = " ".join(section(text, "Pricing").split())
+    for phrase in ("**Free since 2026-11-14.** Before that the listing was paid for three "
+                   "days, at 5 US dollars, one-time.",
+                   # why
+                   "every one of the 15 most used skills on this marketplace was free, and "
+                   "nearly every paid stock listing had no uses.",
+                   "In its three days as a paid listing this one had 6 views and no use.",
+                   "A free listing also carries less of the data-terms risk named in the note "
+                   "for the seller below.",
+                   # what stays true
+                   "The only possible marketplace charge is the marketplace's own optional "
+                   "price-history tool, about $0.07 per call.",
+                   "The skill tells the agent to start none before the user has chosen it, "
+                   "each time. That approval is the skill's instruction to the agent.",
+                   "A free listing that turns paid later locks existing users out until they "
+                   "buy. Do not flip it back lightly.",
+                   "Do not describe it as a signal product."):
+        assert phrase in pricing, phrase
+    # A free listing offers; it does not sell.
+    for phrase in ("This skill offers two-sided reasoning you can check. It does not offer a "
+                   "prediction, a signal or an edge.",
+                   "The listing is free. What it adds is the packaging: the same files as one "
+                   "upload that a marketplace can load."):
+        assert phrase in page, phrase
+    # The design names the decision where it named the plan.
+    design = flat(DESIGN)
+    assert "$5 for 30 days" not in design and "fewer than five sales" not in design
+    assert ("| The listing still sells nothing | Decided on 2026-11-14: the listing is free "
+            "since that day.") in design
+
+
+def test_the_form_fields_in_the_listing_are_the_ones_in_the_fields_file():
+    text, fields = text_of(LISTING), listing_fields()
+    form = section(text, "Form fields")
+    assert dict(re.findall(r"(?m)^\| (.+?) \| (.+?) \|$", form))["Name"] == fields["name"]
+
+    def under(label: str) -> str:
+        return " ".join(form.split("**%s**" % label, 1)[1].split("**", 1)[0].split())
+
+    assert under("Summary") == fields["summary"]
+    assert under("Tags") == ", ".join(fields["tags"])
+    assert under("Keywords") == ", ".join(fields["keywords"])
+    # The page copy points at the file for the other fields, and so does the upload step.
+    note = " ".join(section(text, "Page copy").split("### ", 1)[0].split())
+    assert ("The text for each of them is in [`listing-fields.json`](listing-fields.json)"
+            in note)
+    for name in ("description", "use cases", "usage example", "compatibility note",
+                 "known limitations", "requirements", "permissions", "questions", "sample"):
+        assert name in note, name
+    page = flat(LISTING)
+    assert "the longer ones from [`listing-fields.json`](listing-fields.json)" in page
+    # The first question has the same answer in both.
+    faq = {x["question"]: x["answer"] for x in fields["faq"]}
+    answer = page.split("**Is it really free?**", 1)[1].split("**Isn't this", 1)[0]
+    assert fields["faq"][0]["question"] == "Is it really free?"
+    assert answer.strip() == faq["Is it really free?"]
+
+
+def test_the_fields_file_has_every_field_inside_the_marketplace_limits():
+    assert LISTING_FIELDS.is_file()
+    raw = text_of(LISTING_FIELDS)
+    assert raw.isascii() and raw.endswith("}\n")
+    fields = json.loads(raw)
+    # Every field of the form and nothing else: the notes on how the copy was chosen stay out.
+    assert tuple(fields) == FIELD_KEYS and "rationale" not in fields
+    for key, limit in FIELD_LIMITS.items():
+        assert isinstance(fields[key], str) and 0 < len(fields[key]) <= limit, key
+    for key in ("tags", "keywords", "use_cases", "requirements"):
+        values = fields[key]
+        assert values and len(set(values)) == len(values), key
+        assert all(isinstance(x, str) and x and x == x.strip() for x in values), key
+    assert fields["optional_requirements"] == []
+    assert fields["requirements"] == ["Python 3.9+", "Terminal", "Web access or a price file"]
+    for item in fields["faq"]:
+        assert set(item) == {"question", "answer"} and item["question"].endswith("?"), item
+        assert item["answer"].strip() == item["answer"] != "", item["question"]
+    assert set(fields["permissions"]) == {"hosts", "tools", "file_scopes", "notes"}
+    assert fields["sample_input"].strip() and fields["sample_output"].endswith("\n\n(shortened)")
+
+
+def test_the_fields_file_names_exactly_the_one_host_and_no_ai_host():
+    fields = listing_fields()
+    everything = "\n".join(strings(fields))
+    assert fields["permissions"]["hosts"] == [HOST]
+    assert fields["permissions"]["tools"] == ["bash"]
+    for key in ("description", "requirement_note"):
+        assert HOST in fields[key], key
+    # Every address in the fields is that host. The one other name of that shape is the
+    # publisher of a headline in the sample report.
+    assert "http" not in everything.lower() and "www." not in everything.lower()
+    names = set(re.findall(r"(?i)\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|ai|dev|app|co)\b",
+                           everything))
+    assert names == {HOST, "Barrons.com"}
+    sample = fields["sample_output"]
+    assert "(Barrons.com, 2026-11-11)" in sample
+    assert "Barrons.com" not in everything.replace(sample, "")
+    # No AI host is named, as tested or otherwise, and the fields say so.
+    assert not re.search(AI_HOSTS, everything)
+    assert "This page names no AI host as tested." in fields["compatibility_note"]
+
+
+def test_the_fields_file_states_the_lost_test_and_makes_no_claim():
+    fields = listing_fields()
+    everything = "\n".join(strings(fields))
+    assert "not investment advice" in fields["summary"]
+    described = fields["description"]
+    assert "-0.9%" in described and "+15.7%" in described
+    assert "this desk design lost to buy-and-hold in its only test" in described
+    assert "**It lost its only test.**" in described
+    assert "The packaged skill has not been backtested." in fields["known_limitations"]
+    # The disclosure in the sample report is the script's own, word for word.
+    render, sample = load_script("render.py"), fields["sample_output"]
+    assert "\n\n%s\n\n" % NOT_ADVICE in sample
+    assert "\n- Test record: %s\n" % render.TEST_RECORD in sample
+    assert "\n- %s\n" % render.DISCLAIMER in sample
+    assert " Script %s.\n" % render.VERSION in sample
+    # Outside the sample report the only percentages are the two of the test the desk lost,
+    # and the only amount of money is the charge of the marketplace's own tool.
+    outside = "\n".join(strings({k: v for k, v in fields.items() if k != "sample_output"}))
+    assert set(re.findall(PERCENT, outside)) == {"-0.9%", "+15.7%"}
+    assert set(re.findall(DOLLARS, outside)) == {"$0.07"}
+    for gone in ("$5", "money-back", "one-time", "refund"):
+        assert gone not in everything, gone
+    # None of the forbidden words, outside the sentences listed above.
+    rest = everything
+    for sentence in ALLOWED:
+        assert rest.count(sentence) == 1, sentence
+        rest = rest.replace(sentence, "")
+    for word in FORBIDDEN:
+        assert word not in rest.lower(), word
+
+
+def test_the_fields_file_agrees_with_the_shipped_package(desk_folder):
+    fields = listing_fields()
+    faq = {x["question"]: x["answer"] for x in fields["faq"]}
+    # The number of facts: a company's sheet can hold every fact of the contract, and a coin's
+    # sheet has no statement facts.
+    said = re.search(r"computes about (\d+) named facts for a company \(about (\d+) for an "
+                     r"ETF, index or crypto pair\)", fields["description"])
+    out = sheet_of(desk_folder, coin_bundle())
+    assert out.returncode == 0, out.stderr
+    counts = [len(FACTS), len(brief_of(desk_folder)["facts"])]
+    assert said and [round(n, -1) for n in counts] == [int(x) for x in said.groups()], counts
+    # Four scripts, the standard library, 60 rows.
+    assert "four standard-library Python scripts" in fields["requirement_note"]
+    assert len(contract_scripts()) == 4
+    assert "60 daily rows or more" in fields["requirement_note"]
+    assert "60 daily rows or more" in section(text_of(SKILL_MD), "Step 1")
+    # The marketplace's tool: its charge and its conditions are those of roles.md.
+    roles, refused = flat(ROLES_MD), faq["What if the data source refuses?"]
+    for phrase in ("on a host that saves a tool's result as a file", "about $0.07 per call",
+                   "not for listings in Australia or New Zealand",
+                   "which your agent is told to use only after you choose it"):
+        assert phrase in refused, phrase
+    assert "It costs about $0.07" in roles
+    assert "Do not use this route for a listing in Australia or New Zealand" in roles
+    # The stop sentence of a refusal says what the answer says.
+    assert "After a refusal, waiting rarely helps." in refused
+    assert REFUSED.endswith("this is not a problem with the ticker and waiting rarely helps")
+    # The folder: its name and the condition of the clean-up command.
+    scopes, notes = fields["permissions"]["file_scopes"], fields["permissions"]["notes"]
+    assert scopes[0].startswith("One new folder per run in the system temp directory, named "
+                                "desk-*")
+    assert "only if its name starts with desk- and it holds brief.py" in notes
+    line = " ".join(skill_commands()["rmtree"])
+    assert "p.name.startswith('desk-') and (p / 'brief.py').is_file() and shutil.rmtree" in line
