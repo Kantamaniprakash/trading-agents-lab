@@ -40,7 +40,7 @@ reloads the skill for every user.
 
 | Field | Value |
 |---|---|
-| Name | Trading Agents Desk: Bull and Bear Stock Analysis for a Second Opinion |
+| Name | Trading Agents Desk: Stock Analysis, Bull and Bear Case |
 | Skill id | `trading-agents-desk` |
 | Category | Trading & Investing |
 | Version | 2.0.0 |

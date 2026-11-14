@@ -1049,8 +1049,7 @@ def test_the_build_makes_no_network_request(monkeypatch, tmp_path):
 def test_the_listing_is_for_version_2_and_makes_no_measured_claim():
     text = LISTING.read_text(encoding="utf-8")
     assert "| Version | 2.0.0 |" in text
-    assert "| Name | Trading Agents Desk: Bull and Bear Stock Analysis for a Second Opinion |" \
-        in text
+    assert "| Name | Trading Agents Desk: Stock Analysis, Bull and Bear Case |" in text
     # The listing is free: no price is left on the page, and nothing is sold on it.
     assert "| Price | Free |" in text and "$5" not in text
     # The only percentages on the page are the two of the test the desk lost.

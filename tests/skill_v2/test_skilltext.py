@@ -3003,8 +3003,9 @@ FIELD_KEYS = ("name", "summary", "description", "tags", "keywords", "use_cases",
               "usage_example", "compatibility_note", "known_limitations", "requirements",
               "optional_requirements", "requirement_note", "permissions", "faq", "sample_input",
               "sample_output")
-# The marketplace's limits, in characters.
-FIELD_LIMITS = {"name": 70, "summary": 240, "description": 2600, "usage_example": 320,
+# Limits in characters. The marketplace's form cuts a name at 60 and takes a summary of up to
+# 300; the other limits are this project's own.
+FIELD_LIMITS = {"name": 60, "summary": 300, "description": 2600, "usage_example": 320,
                 "compatibility_note": 300, "known_limitations": 950, "requirement_note": 300}
 # Words that promise what this skill cannot keep, as lower-case substrings.
 FORBIDDEN = ("guarantee", "real-time", "predicts", "profit")
